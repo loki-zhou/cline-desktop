@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测试文件系统 API</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        button {
+            margin: 5px;
+            padding: 8px 16px;
+        }
+        #output {
+            border: 1px solid #ccc;
+            padding: 10px;
+            margin-top: 20px;
+            min-height: 200px;
+            background-color: #f5f5f5;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Cline Desktop 文件系统 API 测试</h1>
+    
+    <div>
+        <h2>工作区操作</h2>
+        <button id="selectWorkspace">选择工作区</button>
+        <button id="getWorkspace">获取当前工作区</button>
+    </div>
+
+    <div>
+        <h2>文件操作</h2>
+        <button id="createFile">创建文件</button>
+        <button id="readFile">读取文件</button>
+        <button id="deleteFile">删除文件</button>
+    </div>
+
+    <div>
+        <h2>目录操作</h2>
+        <button id="createDir">创建目录</button>
+        <button id="listDir">列出目录内容</button>
+        <button id="deleteDir">删除目录</button>
+    </div>
+
+    <div>
+        <h2>输出</h2>
+        <pre id="output"></pre>
+    </div>
+
+    <script>
+        // 引入 Tauri API
+        const { invoke } = window.__TAURI__.tauri;
+        const { open } = window.__TAURI__.dialog;
+
+        // 输出区域
+        const outputElement = document.getElementById('output');
+        
+        // 记录输出
+        function log(message) {
+            outputElement.textContent += message + '\n';
+            console.log(message);
+        }
+
+        // 清除输出
+        function clearOutput() {
+            outputElement.textContent = '';
+        }
+
+        // 选择工作区
+        document.getElementById('selectWorkspace').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const selected = await open({
+                    directory: true,
+                    multiple: false,
+                    title: '选择工作区文件夹'
+                });
+                
+                if (selected === null) {
+                    log('用户取消了选择');
+                    return;
+                }
+                
+                log(`选择的工作区路径: ${selected}`);
+                
+                // 设置工作区路径
+                await invoke('set_workspace_path', { path: selected });
+                log('工作区路径已设置');
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+
+        // 获取当前工作区
+        document.getElementById('getWorkspace').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const path = await invoke('get_workspace_path');
+                if (path) {
+                    log(`当前工作区路径: ${path}`);
+                } else {
+                    log('未设置工作区路径');
+                }
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+
+        // 创建文件
+        document.getElementById('createFile').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const workspace = await invoke('get_workspace_path');
+                if (!workspace) {
+                    log('请先选择工作区');
+                    return;
+                }
+                
+                const filePath = `${workspace}/test-file.txt`;
+                const content = `这是一个测试文件\n创建时间: ${new Date().toLocaleString()}`;
+                
+                await invoke('write_file_content', { path: filePath, content });
+                log(`文件已创建: ${filePath}`);
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+
+        // 读取文件
+        document.getElementById('readFile').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const workspace = await invoke('get_workspace_path');
+                if (!workspace) {
+                    log('请先选择工作区');
+                    return;
+                }
+                
+                const filePath = `${workspace}/test-file.txt`;
+                
+                // 检查文件是否存在
+                const exists = await invoke('file_exists', { path: filePath });
+                if (!exists) {
+                    log(`文件不存在: ${filePath}`);
+                    return;
+                }
+                
+                const content = await invoke('read_file_content', { path: filePath });
+                log(`文件内容:\n${content}`);
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+
+        // 删除文件
+        document.getElementById('deleteFile').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const workspace = await invoke('get_workspace_path');
+                if (!workspace) {
+                    log('请先选择工作区');
+                    return;
+                }
+                
+                const filePath = `${workspace}/test-file.txt`;
+                
+                // 检查文件是否存在
+                const exists = await invoke('file_exists', { path: filePath });
+                if (!exists) {
+                    log(`文件不存在: ${filePath}`);
+                    return;
+                }
+                
+                await invoke('delete_file', { path: filePath });
+                log(`文件已删除: ${filePath}`);
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+
+        // 创建目录
+        document.getElementById('createDir').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const workspace = await invoke('get_workspace_path');
+                if (!workspace) {
+                    log('请先选择工作区');
+                    return;
+                }
+                
+                const dirPath = `${workspace}/test-dir`;
+                
+                await invoke('create_directory', { path: dirPath });
+                log(`目录已创建: ${dirPath}`);
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+
+        // 列出目录内容
+        document.getElementById('listDir').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const workspace = await invoke('get_workspace_path');
+                if (!workspace) {
+                    log('请先选择工作区');
+                    return;
+                }
+                
+                const entries = await invoke('list_directory', { path: workspace });
+                log(`目录内容 (${entries.length} 项):`);
+                entries.forEach(entry => {
+                    log(`- ${entry}`);
+                });
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+
+        // 删除目录
+        document.getElementById('deleteDir').addEventListener('click', async () => {
+            clearOutput();
+            try {
+                const workspace = await invoke('get_workspace_path');
+                if (!workspace) {
+                    log('请先选择工作区');
+                    return;
+                }
+                
+                const dirPath = `${workspace}/test-dir`;
+                
+                await invoke('delete_directory', { path: dirPath, recursive: true });
+                log(`目录已删除: ${dirPath}`);
+            } catch (error) {
+                log(`错误: ${error}`);
+            }
+        });
+    </script>
+</body>
+</html>

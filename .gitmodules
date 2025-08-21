@@ -1,0 +1,3 @@
+[submodule "cline"]
+	path = cline
+	url = https://github.com/loki-zhou/cline.git
