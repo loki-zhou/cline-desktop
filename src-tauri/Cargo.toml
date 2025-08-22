@@ -40,3 +40,9 @@ ctrlc = "3.4"
 reqwest = { version = "0.11", features = ["json"] }
 # 用于全局变量
 lazy_static = "1.4"
+# 用于异步 trait
+async-trait = "0.1"
+# 用于测试的 futures 库
+futures = "0.3"
+# 用于时间处理
+chrono = { version = "0.4", features = ["serde"] }

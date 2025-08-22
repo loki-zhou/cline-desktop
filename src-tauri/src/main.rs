@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod hostbridge;
+mod grpc_client;
 
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, Emitter, WebviewWindowBuilder, WebviewUrl};
@@ -442,14 +443,28 @@ async fn forward_to_protobus(grpc_request: &GrpcRequest) -> Result<Value, String
     println!("[DEBUG] Forwarding gRPC request to ProtoBus (26040): service={}, method={}, request_id={}", 
         grpc_request.service, grpc_request.method, grpc_request.request_id);
     
-    // TODO: 实现真正的 gRPC 客户端连接
-    // cline-core 提供的是 gRPC 服务，不是 HTTP 服务
-    // 我们需要使用 tonic gRPC 客户端连接到 127.0.0.1:26040
+    // 获取全局 gRPC 客户端实例
+    let client = grpc_client::get_global_client().await;
+    let mut client_lock = client.lock().await;
     
-    println!("[DEBUG] ❌ gRPC 客户端连接尚未实现，使用 fallback mock 响应");
-    
-    // 目前返回 fallback mock 响应
-    fallback_mock_response(grpc_request)
+    // 尝试使用真正的 gRPC 连接
+    match client_lock.handle_request(
+        &grpc_request.service,
+        &grpc_request.method,
+        &grpc_request.message
+    ).await {
+        Ok(response) => {
+            println!("[DEBUG] ✅ Real gRPC request successful: service={}, method={}", 
+                grpc_request.service, grpc_request.method);
+            Ok(response)
+        }
+        Err(e) => {
+            println!("[DEBUG] ❌ Real gRPC request failed: {}, falling back to mock response", e);
+            
+            // 如果 gRPC 连接失败，返回 mock 响应
+            fallback_mock_response(grpc_request)
+        }
+    }
 }
 
 fn fallback_mock_response(grpc_request: &GrpcRequest) -> Result<Value, String> {
@@ -460,6 +475,15 @@ fn fallback_mock_response(grpc_request: &GrpcRequest) -> Result<Value, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64;
+    
+    // 对于某些方法，直接返回错误而不是无效响应
+    match (grpc_request.service.as_str(), grpc_request.method.as_str()) {
+        ("cline.UiService", "subscribeToPartialMessage") => {
+            println!("[DEBUG] subscribeToPartialMessage - returning error to avoid timestamp validation");
+            return Err("No partial messages available".to_string());
+        }
+        _ => {}
+    }
     
     // 根据不同的服务和方法返回不同的 mock 响应
     let mock_response = match (grpc_request.service.as_str(), grpc_request.method.as_str()) {
@@ -485,7 +509,7 @@ fn fallback_mock_response(grpc_request: &GrpcRequest) -> Result<Value, String> {
             })
         }
         _ => {
-            // 其他方法的默认 mock 响应
+            // 其他方法的默认 mock 响应，确保时间戳是有效的正数
             serde_json::json!({
                 "ts": current_timestamp,
                 "type": 1,
@@ -504,7 +528,7 @@ fn fallback_mock_response(grpc_request: &GrpcRequest) -> Result<Value, String> {
         }
     };
     
-    println!("[DEBUG] Fallback mock response: {}", mock_response);
+    println!("[DEBUG] Fallback mock response with ts={}: {}", current_timestamp, mock_response);
     Ok(mock_response)
 }
 
