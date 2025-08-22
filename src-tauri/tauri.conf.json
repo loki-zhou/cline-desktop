@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../cline/webview-ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd cline && npm run install:all && npm run dev:webview",
-    "beforeBuildCommand": "cd cline && npm run install:all && npm run build:webview"
+    "beforeDevCommand": "cd cline && npm run compile-standalone && cd ../cline/webview-ui && npm run dev -- --port 5173",
+    "beforeBuildCommand": "cd cline && npm run compile-standalone && cd ../cline/webview-ui && npm run build"
   },
   "app": {
     "withGlobalTauri": true,
@@ -36,6 +36,9 @@
     ],
     "resources": [
       "../cline/dist-standalone"
+    ],
+    "externalBin": [
+      "../node-server/dist/node-server"
     ]
   },
   "plugins": {
@@ -43,10 +46,10 @@
       "all": true,
       "request": true,
       "scope": [
-        "http://127.0.0.1:26040/*"
+        "http://127.0.0.1:26040/*",
+        "http://localhost:26040/*"
       ]
     },
-    "dialog": {},
     "shell": {
       "open": true
     }

@@ -1,67 +1,13 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::{Emitter, Manager};
-use tauri_plugin_shell::ShellExt;
-use tauri_plugin_dialog::FileDialogBuilder;
-use tonic::transport::Channel;
-use tonic::{Request, Status};
-use prost::Message;
-use std::collections::HashMap;
+mod hostbridge;
+
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use futures::StreamExt;
-
-#[tauri::command]
-async fn grpc_request(
-    service: String,
-    method: String,
-    message: serde_json::Value,
-    is_streaming: bool,
-    request_id: Option<String>,
-    app_handle: tauri::AppHandle,
-) -> Result<String, String> {
-    println!(
-        "gRPC request: service={}, method={}, is_streaming={}, request_id={:?}",
-        service, method, is_streaming, request_id
-    );
-
-    // 连接到 cline-core 的 gRPC 服务
-    let channel = match Channel::from_static("http://127.0.0.1:26040")
-        .connect()
-        .await
-    {
-        Ok(channel) => channel,
-        Err(e) => {
-            eprintln!("Failed to connect to gRPC server: {}", e);
-            return Err(format!("Failed to connect to gRPC server: {}", e));
-        }
-    };
-
-    if is_streaming {
-        // 处理流式请求
-        if let Some(id) = request_id {
-            match handle_streaming_request(&service, &method, message, channel, id.clone(), app_handle.clone()).await {
-                Ok(_) => Ok("{\"status\": \"streaming_started\"}".to_string()),
-                Err(e) => Err(format!("Streaming request failed: {}", e)),
-            }
-        } else {
-            Err("Request ID is required for streaming requests".to_string())
-        }
-    } else {
-        // 处理普通请求
-        match handle_unary_request(&service, &method, message, channel).await {
-            Ok(response) => Ok(response),
-            Err(e) => Err(format!("Unary request failed: {}", e)),
-        }
-    }
-}
-
-#[tauri::command]
-async fn grpc_request_cancel(request_id: String) {
-    println!("gRPC request cancelled: {}", request_id);
-}
+use tauri::{Manager, Emitter};
+use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::{CommandEvent, CommandChild};
 
 #[tauri::command]
 async fn select_workspace(app_handle: tauri::AppHandle) -> Result<String, String> {
@@ -70,143 +16,348 @@ async fn select_workspace(app_handle: tauri::AppHandle) -> Result<String, String
     // 使用对话框插件打开文件夹选择对话框
     let dialog = app_handle.dialog();
     
-    // 使用异步方式打开文件夹选择对话框
-    let result = dialog.file().pick_folder().await;
+    // 使用回调方式打开文件夹选择对话框
+    let (tx, rx) = std::sync::mpsc::channel();
     
-    match result {
-        Some(folder_path) => {
-            let path_str = folder_path.to_string_lossy().to_string();
+    dialog.file().pick_folder(move |folder_path| {
+        let _ = tx.send(folder_path);
+    });
+    
+    // 等待对话框结果
+    match rx.recv() {
+        Ok(Some(folder_path)) => {
+            let path_str = folder_path.to_string();
             println!("Workspace selected: {}", path_str);
-            
-            // 将工作区路径发送给 cline-core
-            if let Err(e) = send_workspace_to_cline_core(&path_str).await {
-                eprintln!("Failed to send workspace to cline-core: {}", e);
-                return Err(format!("Failed to send workspace path: {}", e));
-            }
-            
             Ok(path_str)
         }
-        None => {
+        Ok(None) => {
             println!("Workspace selection cancelled by user");
             Err("Workspace selection cancelled".to_string())
         }
-    }
-}
-
-// 发送工作区路径到 cline-core
-async fn send_workspace_to_cline_core(workspace_path: &str) -> Result<(), String> {
-    // 连接到 cline-core 的 gRPC 服务
-    let channel = match Channel::from_static("http://127.0.0.1:26040")
-        .connect()
-        .await
-    {
-        Ok(channel) => channel,
-        Err(e) => {
-            return Err(format!("Failed to connect to gRPC server: {}", e));
+        Err(_) => {
+            println!("Error receiving dialog result");
+            Err("Error receiving dialog result".to_string())
         }
-    };
-    
-    // 这里需要根据实际的 protobuf 定义来构建工作区设置请求
-    // 暂时先打印日志，后续需要实现具体的 gRPC 调用
-    println!("Sending workspace path to cline-core: {}", workspace_path);
-    
-    // TODO: 实现具体的 gRPC 调用设置工作区路径
-    // 示例: 
-    // let mut client = WorkspaceServiceClient::new(channel);
-    // let request = SetWorkspaceRequest { path: workspace_path.to_string() };
-    // client.set_workspace(request).await.map_err(|e| format!("gRPC error: {}", e))?;
-    
-    Ok(())
+    }
 }
 
-// 处理普通 gRPC 请求
-async fn handle_unary_request(
-    service: &str,
-    method: &str,
-    message: serde_json::Value,
-    channel: Channel,
-) -> Result<String, String> {
-    // 这里需要根据具体的服务和方法来构建请求
-    // 由于 protobuf 类型定义复杂，这里先返回模拟响应
-    // 后续需要根据实际的 protobuf 定义来实现
-    
-    println!("Handling unary request: {}.{}", service, method);
-    println!("Message: {:?}", message);
-    
-    // 模拟响应 - 实际实现需要根据 protobuf 定义来构建
-    Ok("{\"message\": \"Real gRPC response from cline-core\"}".to_string())
+// 全局进程管理器，用于跟踪所有子进程
+struct ProcessManager {
+    processes: Vec<CommandChild>,
 }
 
-// 处理流式 gRPC 请求
-async fn handle_streaming_request(
-    service: &str,
-    method: &str,
-    message: serde_json::Value,
-    channel: Channel,
-    request_id: String,
+impl ProcessManager {
+    fn new() -> Self {
+        Self {
+            processes: Vec::new(),
+        }
+    }
+
+    fn add_process(&mut self, child: CommandChild) {
+        self.processes.push(child);
+    }
+
+    fn kill_all(&mut self) {
+        let mut processes_to_kill = Vec::new();
+        std::mem::swap(&mut processes_to_kill, &mut self.processes);
+        
+        for mut process in processes_to_kill {
+            if let Err(e) = process.kill() {
+                eprintln!("Failed to kill process: {}", e);
+            }
+        }
+    }
+}
+
+// 创建一个全局的进程管理器
+type SharedProcessManager = Arc<Mutex<ProcessManager>>;
+
+fn create_process_manager() -> SharedProcessManager {
+    Arc::new(Mutex::new(ProcessManager::new()))
+}
+
+#[tauri::command]
+async fn start_cline_core(
     app_handle: tauri::AppHandle,
-) -> Result<(), String> {
-    println!("Handling streaming request: {}.{}", service, method);
-    println!("Message: {:?}", message);
+    process_manager: tauri::State<'_, SharedProcessManager>
+) -> Result<String, String> {
+    println!("Starting cline-core process...");
     
-    // 模拟流式响应 - 实际实现需要根据 protobuf 定义来构建
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let event_name = format!("grpc_response_{}", request_id);
-        window
-            .emit(&event_name, Some("{\"message\": \"Real streaming response from cline-core\"}"))
-            .map_err(|e| format!("Failed to emit streaming response: {}", e))?;
+    // 使用shell直接运行node + cline-core.js
+    // 确保工作目录是正确的
+    let cline_core_path = "cline-core.js";
+    let command = app_handle
+        .shell()
+        .command("node")
+        .args([cline_core_path])
+        .current_dir("../cline/dist-standalone"); // 设置正确的工作目录
+    
+    let (mut rx, child) = command
+        .spawn()
+        .map_err(|e| format!("Failed to spawn cline-core process: {}", e))?;
+    
+    // 将子进程添加到进程管理器中
+    {
+        let mut manager = process_manager.lock().unwrap();
+        manager.add_process(child);
     }
     
-    Ok(())
+    println!("Cline core process started");
+    
+    // 处理cline-core的输出
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Some(window) = handle.get_webview_window("main") {
+                match event {
+                    CommandEvent::Stdout(line) => {
+                        println!("cline-core stdout: {}", String::from_utf8_lossy(&line));
+                        window
+                            .emit("cline-stdout", String::from_utf8_lossy(&line).to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Stderr(line) => {
+                        eprintln!("cline-core stderr: {}", String::from_utf8_lossy(&line));
+                        window
+                            .emit("cline-stderr", String::from_utf8_lossy(&line).to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Error(err) => {
+                        eprintln!("cline-core error: {}", err);
+                        window
+                            .emit("cline-error", err.to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Terminated(status) => {
+                        println!("cline-core terminated with status: {:?}", status);
+                        window
+                            .emit("cline-terminated", status)
+                            .expect("failed to emit event");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    
+    Ok("Cline core started successfully".to_string())
+}
+
+#[tauri::command]
+async fn start_node_server(
+    app_handle: tauri::AppHandle,
+    process_manager: tauri::State<'_, SharedProcessManager>,
+    script_path: String,
+    args: Vec<String>
+) -> Result<String, String> {
+    println!("Starting Node.js server: {}", script_path);
+    
+    // 创建一个新的命令来启动Node.js进程
+    let command = app_handle
+        .shell()
+        .command("node");
+    
+    // 构建参数
+    let mut all_args = vec![script_path];
+    all_args.extend(args);
+    
+    let command = command.args(all_args);
+    
+    let (mut rx, child) = command
+        .spawn()
+        .map_err(|e| format!("Failed to spawn Node.js process: {}", e))?;
+    
+    // 将子进程添加到进程管理器中
+    {
+        let mut manager = process_manager.lock().unwrap();
+        manager.add_process(child);
+    }
+    
+    println!("Node.js server started");
+    
+    // 处理Node.js进程的输出
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Some(window) = handle.get_webview_window("main") {
+                match event {
+                    CommandEvent::Stdout(line) => {
+                        println!("Node.js stdout: {}", String::from_utf8_lossy(&line));
+                        window
+                            .emit("node-stdout", String::from_utf8_lossy(&line).to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Stderr(line) => {
+                        eprintln!("Node.js stderr: {}", String::from_utf8_lossy(&line));
+                        window
+                            .emit("node-stderr", String::from_utf8_lossy(&line).to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Error(err) => {
+                        eprintln!("Node.js error: {}", err);
+                        window
+                            .emit("node-error", err.to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Terminated(status) => {
+                        println!("Node.js terminated with status: {:?}", status);
+                        window
+                            .emit("node-terminated", status)
+                            .expect("failed to emit event");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    
+    Ok("Node.js server started successfully".to_string())
+}
+
+#[tauri::command]
+async fn start_node_server_sidecar(
+    app_handle: tauri::AppHandle,
+    process_manager: tauri::State<'_, SharedProcessManager>,
+    port: u16
+) -> Result<String, String> {
+    println!("Starting Node.js server sidecar on port {}", port);
+    
+    // 使用sidecar功能启动Node.js服务器
+    let sidecar_command = app_handle
+        .shell()
+        .sidecar("node-server")
+        .map_err(|e| format!("Failed to get sidecar command: {}", e))?;
+    
+    // 传递端口参数
+    let sidecar_command = sidecar_command.args(&[port.to_string()]);
+    
+    let (mut rx, child) = sidecar_command
+        .spawn()
+        .map_err(|e| format!("Failed to spawn Node.js sidecar: {}", e))?;
+    
+    // 将子进程添加到进程管理器中
+    {
+        let mut manager = process_manager.lock().unwrap();
+        manager.add_process(child);
+    }
+    
+    println!("Node.js sidecar started");
+    
+    // 处理sidecar的输出
+    let handle = app_handle.clone();
+    let ready_flag = "NODE_SERVER_READY";
+    let mut server_ready = false;
+    
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            if let Some(window) = handle.get_webview_window("main") {
+                match event {
+                    CommandEvent::Stdout(line) => {
+                        let line_str = String::from_utf8_lossy(&line).to_string();
+                        println!("Node.js sidecar stdout: {}", line_str);
+                        
+                        // 检查服务器是否准备就绪
+                        if !server_ready && line_str.contains(ready_flag) {
+                            server_ready = true;
+                            window
+                                .emit("node-server-ready", port)
+                                .expect("failed to emit ready event");
+                        }
+                        
+                        window
+                            .emit("node-stdout", line_str)
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Stderr(line) => {
+                        eprintln!("Node.js sidecar stderr: {}", String::from_utf8_lossy(&line));
+                        window
+                            .emit("node-stderr", String::from_utf8_lossy(&line).to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Error(err) => {
+                        eprintln!("Node.js sidecar error: {}", err);
+                        window
+                            .emit("node-error", err.to_string())
+                            .expect("failed to emit event");
+                    }
+                    CommandEvent::Terminated(status) => {
+                        println!("Node.js sidecar terminated with status: {:?}", status);
+                        window
+                            .emit("node-terminated", status)
+                            .expect("failed to emit event");
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    
+    Ok(format!("Node.js sidecar started on port {}", port))
+}
+
+#[tauri::command]
+fn stop_all_processes(process_manager: tauri::State<'_, SharedProcessManager>) -> Result<String, String> {
+    println!("Stopping all child processes...");
+    
+    // 使用作用域来确保锁在函数结束前被释放
+    {
+        let mut manager = process_manager.lock().unwrap();
+        manager.kill_all();
+    }
+    
+    Ok("All processes stopped successfully".to_string())
 }
 
 fn main() {
+    // 创建进程管理器
+    let process_manager = create_process_manager();
+    
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .manage(process_manager) // 将进程管理器添加到Tauri状态中
         .invoke_handler(tauri::generate_handler![
-            grpc_request,
-            grpc_request_cancel,
-            select_workspace
+            select_workspace,
+            start_cline_core,
+            start_node_server,
+            start_node_server_sidecar,
+            stop_all_processes
         ])
         .setup(|app| {
-            let handle = app.handle().clone();
+            let app_handle = app.handle().clone();
+            
+            // 首先启动 HostBridge 服务器（在 Rust 中）
+            let hostbridge_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                // Start the cline-core process manually
-                let (mut rx, _child) = handle
-                    .shell()
-                    .command("node")
-                    .args(["../cline/dist-standalone/cline-core.js"])
-                    .spawn()
-                    .expect("Failed to spawn cline-core");
-
-                while let Some(event) = rx.recv().await {
-                    if let Some(window) = handle.get_webview_window("main") {
-                        match event {
-                            tauri_plugin_shell::process::CommandEvent::Stdout(line) => {
-                                println!("cline-core stdout: {}", String::from_utf8_lossy(&line));
-                                window
-                                    .emit("sidecar-stdout", Some(String::from_utf8_lossy(&line)))
-                                    .expect("failed to emit event");
-                            }
-                            tauri_plugin_shell::process::CommandEvent::Stderr(line) => {
-                                eprintln!("cline-core stderr: {}", String::from_utf8_lossy(&line));
-                                window
-                                    .emit("sidecar-stderr", Some(String::from_utf8_lossy(&line)))
-                                    .expect("failed to emit event");
-                            }
-                            tauri_plugin_shell::process::CommandEvent::Error(line) => {
-                                eprintln!("cline-core error: {}", line);
-                                window
-                                    .emit("sidecar-error", Some(line))
-                                    .expect("failed to emit event");
-                            }
-                            _ => {}
-                        }
-                    }
+                if let Err(e) = hostbridge::start_hostbridge_server(hostbridge_handle).await {
+                    eprintln!("Failed to start HostBridge server: {}", e);
                 }
             });
+            
+            // 在应用启动时自动启动cline-core
+            tauri::async_runtime::spawn(async move {
+                // 获取进程管理器状态
+                let process_manager_state = app_handle.state::<SharedProcessManager>();
+                
+                match start_cline_core(app_handle.clone(), process_manager_state).await {
+                    Ok(msg) => println!("{}", msg),
+                    Err(e) => eprintln!("Error starting cline-core: {}", e)
+                }
+            });
+            
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 当窗口关闭时，确保所有子进程都被终止
+            if let tauri::WindowEvent::Destroyed = event {
+                println!("Window is being destroyed, killing all child processes...");
+                let app_handle = window.app_handle();
+                let state = app_handle.state::<SharedProcessManager>();
+                
+                // 直接调用非异步的 kill_all 方法
+                let mut manager = state.lock().unwrap();
+                manager.kill_all();
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
