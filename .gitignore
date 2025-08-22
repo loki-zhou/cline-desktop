@@ -101,6 +101,7 @@ webview-ui/dist/
 # Project specific
 .codebuddy/
 test-results/
+node-server/
 node-server/dist/
 
 # IDE and Editor files
