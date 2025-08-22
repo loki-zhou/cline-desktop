@@ -4,10 +4,13 @@
 mod hostbridge;
 
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, Emitter};
+use tauri::{Manager, Emitter, WebviewWindowBuilder, WebviewUrl};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::{CommandEvent, CommandChild};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 
 #[tauri::command]
 async fn select_workspace(app_handle: tauri::AppHandle) -> Result<String, String> {
@@ -54,18 +57,22 @@ impl ProcessManager {
     }
 
     fn add_process(&mut self, child: CommandChild) {
+        println!("Adding process to manager, total processes: {}", self.processes.len() + 1);
         self.processes.push(child);
     }
 
     fn kill_all(&mut self) {
+        println!("Attempting to kill {} child processes...", self.processes.len());
         let mut processes_to_kill = Vec::new();
         std::mem::swap(&mut processes_to_kill, &mut self.processes);
         
-        for mut process in processes_to_kill {
-            if let Err(e) = process.kill() {
-                eprintln!("Failed to kill process: {}", e);
+        for process in processes_to_kill {
+            match process.kill() {
+                Ok(_) => println!("Successfully killed a child process"),
+                Err(e) => eprintln!("Failed to kill process: {}", e),
             }
         }
+        println!("Finished killing all child processes");
     }
 }
 
@@ -111,9 +118,28 @@ async fn start_cline_core(
             if let Some(window) = handle.get_webview_window("main") {
                 match event {
                     CommandEvent::Stdout(line) => {
-                        println!("cline-core stdout: {}", String::from_utf8_lossy(&line));
+                        let line_str = String::from_utf8_lossy(&line);
+                        println!("cline-core stdout: {}", line_str);
+                        
+                        // 更灵活的就绪检测条件 - 检测多种可能的就绪信号
+                        if line_str.contains("HostBridge is serving") || 
+                           line_str.contains("ProtoBus gRPC server listening on") {
+                            let window_clone = window.clone();
+                            println!("[DEBUG] Detected cline-core ready signal: {}", line_str.trim());
+                            println!("[DEBUG] Emitting cline-core-ready event in 1 second...");
+                            // 在发送就绪事件之前，添加一个短暂的非阻塞延迟
+                            tauri::async_runtime::spawn(async move {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                                println!("[DEBUG] Emitting cline-core-ready event now");
+                                match window_clone.emit("cline-core-ready", ()) {
+                                    Ok(_) => println!("[DEBUG] ✅ cline-core-ready event emitted successfully"),
+                                    Err(e) => println!("[DEBUG] ❌ Failed to emit cline-core-ready event: {}", e),
+                                }
+                            });
+                        }
+                        
                         window
-                            .emit("cline-stdout", String::from_utf8_lossy(&line).to_string())
+                            .emit("cline-stdout", line_str.to_string())
                             .expect("failed to emit event");
                     }
                     CommandEvent::Stderr(line) => {
@@ -296,7 +322,7 @@ async fn start_node_server_sidecar(
 }
 
 #[tauri::command]
-fn stop_all_processes(process_manager: tauri::State<'_, SharedProcessManager>) -> Result<String, String> {
+async fn stop_all_processes(process_manager: tauri::State<'_, SharedProcessManager>) -> Result<String, String> {
     println!("Stopping all child processes...");
     
     // 使用作用域来确保锁在函数结束前被释放
@@ -308,9 +334,237 @@ fn stop_all_processes(process_manager: tauri::State<'_, SharedProcessManager>) -
     Ok("All processes stopped successfully".to_string())
 }
 
+// Webview消息结构体
+#[derive(Debug, Deserialize, Serialize)]
+struct WebviewMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    #[serde(rename = "grpc_request")]
+    grpc_request: Option<GrpcRequest>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GrpcRequest {
+    service: String,
+    method: String,
+    message: Value,
+    request_id: String,
+    is_streaming: bool,
+}
+
+#[tauri::command]
+async fn handle_webview_message(
+    app_handle: tauri::AppHandle,
+    message: WebviewMessage,
+) -> Result<Value, String> {
+    println!("[DEBUG] Received webview message: type={:?}", message.message_type);
+    
+    // 根据消息类型处理
+    let result = match message.message_type.as_str() {
+        "grpc_request" => {
+            if let Some(grpc_request) = message.grpc_request {
+                println!("[DEBUG] Processing gRPC request: service={}, method={}, request_id={}, is_streaming={}",
+                    grpc_request.service, grpc_request.method, grpc_request.request_id, grpc_request.is_streaming);
+                
+                // 根据服务类型转发到不同的端口
+                let forward_result = if grpc_request.service.starts_with("cline.") {
+                    println!("[DEBUG] Forwarding to ProtoBus (26040): {} {}", grpc_request.service, grpc_request.method);
+                    // 转发到ProtoBus (Node.js cline-core on port 26040)
+                    forward_to_protobus(&grpc_request).await
+                } else if grpc_request.service.starts_with("host.") {
+                    println!("[DEBUG] Forwarding to HostBridge (26041): {} {}", grpc_request.service, grpc_request.method);
+                    // 转发到HostBridge (Rust HostBridge on port 26041)
+                    forward_to_hostbridge(&grpc_request).await
+                } else {
+                    Err(format!("Unknown service: {}", grpc_request.service))
+                };
+                
+                // 将结果发送回前端
+                if let Some(window) = app_handle.get_webview_window("main") {
+                    let response_message = match forward_result {
+                        Ok(ref response_data) => {
+                            println!("[DEBUG] Sending successful response back to frontend for request_id: {}", grpc_request.request_id);
+                            serde_json::json!({
+                                "type": "grpc_response",
+                                "grpc_response": {
+                                    "request_id": grpc_request.request_id,
+                                    "message": response_data,
+                                    "error": null,
+                                    "is_streaming": grpc_request.is_streaming
+                                }
+                            })
+                        },
+                        Err(ref error_msg) => {
+                            println!("[DEBUG] Sending error response back to frontend for request_id: {}", grpc_request.request_id);
+                            serde_json::json!({
+                                "type": "grpc_response",
+                                "grpc_response": {
+                                    "request_id": grpc_request.request_id,
+                                    "message": null,
+                                    "error": error_msg,
+                                    "is_streaming": false
+                                }
+                            })
+                        }
+                    };
+                    
+                    // 使用 eval 执行 JavaScript 将响应发送到前端
+                    let js_code = format!(
+                        "window.dispatchEvent(new MessageEvent('message', {{ data: {} }}));",
+                        response_message.to_string()
+                    );
+                    
+                    match window.eval(&js_code) {
+                        Ok(_) => println!("[DEBUG] ✅ Response sent to frontend successfully"),
+                        Err(e) => println!("[DEBUG] ❌ Failed to send response to frontend: {}", e),
+                    }
+                }
+                
+                forward_result
+            } else {
+                Err("Missing grpc_request in message".to_string())
+            }
+        }
+        _ => Err(format!("Unknown message type: {}", message.message_type)),
+    };
+    
+    // 返回处理结果
+    match result {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            println!("[DEBUG] Handle webview message error: {}", error);
+            Ok(serde_json::json!({ "error": error }))
+        }
+    }
+}
+
+async fn forward_to_protobus(grpc_request: &GrpcRequest) -> Result<Value, String> {
+    println!("[DEBUG] Forwarding gRPC request to ProtoBus (26040): service={}, method={}, request_id={}", 
+        grpc_request.service, grpc_request.method, grpc_request.request_id);
+    
+    // TODO: 实现真正的 gRPC 客户端连接
+    // cline-core 提供的是 gRPC 服务，不是 HTTP 服务
+    // 我们需要使用 tonic gRPC 客户端连接到 127.0.0.1:26040
+    
+    println!("[DEBUG] ❌ gRPC 客户端连接尚未实现，使用 fallback mock 响应");
+    
+    // 目前返回 fallback mock 响应
+    fallback_mock_response(grpc_request)
+}
+
+fn fallback_mock_response(grpc_request: &GrpcRequest) -> Result<Value, String> {
+    println!("[DEBUG] ❌ Using fallback mock response for: {}.{}", 
+        grpc_request.service, grpc_request.method);
+        
+    let current_timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    
+    // 根据不同的服务和方法返回不同的 mock 响应
+    let mock_response = match (grpc_request.service.as_str(), grpc_request.method.as_str()) {
+        ("cline.StateService", "subscribeToState") | ("cline.StateService", "getLatestState") => {
+            // 返回包含 state_json 的状态响应
+            serde_json::json!({
+                "state_json": serde_json::json!({
+                    "version": "2.0.0",
+                    "clineMessages": [],
+                    "taskHistory": [],
+                    "apiConfiguration": {},
+                    "customInstructions": "",
+                    "alwaysAllowReadOnly": false,
+                    "alwaysAllowWrite": false,
+                    "alwaysAllowExecute": false,
+                    "alwaysAllowBrowser": false,
+                    "alwaysAllowMcp": false,
+                    "didShowWelcome": true,
+                    "shouldShowAnnouncement": false,
+                    "experimentalTerminal": false,
+                    "timestamp": current_timestamp
+                }).to_string()
+            })
+        }
+        _ => {
+            // 其他方法的默认 mock 响应
+            serde_json::json!({
+                "ts": current_timestamp,
+                "type": 1,
+                "ask": 0,
+                "say": 4,
+                "text": format!("Mock response for {}.{}", grpc_request.service, grpc_request.method),
+                "reasoning": "",
+                "images": [],
+                "files": [],
+                "partial": false,
+                "lastCheckpointHash": "",
+                "isCheckpointCheckedOut": false,
+                "isOperationOutsideWorkspace": false,
+                "conversationHistoryIndex": 0
+            })
+        }
+    };
+    
+    println!("[DEBUG] Fallback mock response: {}", mock_response);
+    Ok(mock_response)
+}
+
+async fn forward_to_hostbridge(grpc_request: &GrpcRequest) -> Result<Value, String> {
+    println!("[DEBUG] Forwarding to HostBridge (26041): service={}, method={}, request_id={}", 
+        grpc_request.service, grpc_request.method, grpc_request.request_id);
+    
+    // 构建请求URL
+    let url = format!("http://127.0.0.1:26041/{}/{}", grpc_request.service, grpc_request.method);
+    println!("[DEBUG] HostBridge URL: {}", url);
+    
+    // 创建HTTP客户端
+    let client = reqwest::Client::new();
+    
+    // 发送POST请求到HostBridge
+    match client.post(&url)
+        .json(&grpc_request.message)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            let status = response.status();
+            println!("[DEBUG] HostBridge response status: {}", status);
+            
+            if status.is_success() {
+                let response_json: Value = response.json().await
+                    .map_err(|e| {
+                        println!("[DEBUG] Failed to parse HostBridge response JSON: {}", e);
+                        format!("Failed to parse response JSON: {}", e)
+                    })?;
+                println!("[DEBUG] HostBridge request successful: service={}, method={}", 
+                    grpc_request.service, grpc_request.method);
+                Ok(response_json)
+            } else {
+                let error_msg = format!("HostBridge returned error status: {}", status);
+                println!("[DEBUG] {}", error_msg);
+                Err(error_msg)
+            }
+        }
+        Err(e) => {
+            let error_msg = format!("Failed to forward request to HostBridge: {}", e);
+            println!("[DEBUG] {}", error_msg);
+            Err(error_msg)
+        }
+    }
+}
+
 fn main() {
     // 创建进程管理器
     let process_manager = create_process_manager();
+    
+    // 设置 Ctrl+C 处理程序来清理子进程
+    let cleanup_manager = process_manager.clone();
+    ctrlc::set_handler(move || {
+        println!("Received Ctrl+C, cleaning up child processes...");
+        if let Ok(mut manager) = cleanup_manager.lock() {
+            manager.kill_all();
+        }
+        std::process::exit(0);
+    }).expect("Error setting Ctrl-C handler");
     
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -321,10 +575,16 @@ fn main() {
             start_cline_core,
             start_node_server,
             start_node_server_sidecar,
-            stop_all_processes
+            stop_all_processes,
+            handle_webview_message
         ])
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_title("Cline Desktop").unwrap();
+                // 其他窗口自定义操作
+            }
             
             // 首先启动 HostBridge 服务器（在 Rust 中）
             let hostbridge_handle = app_handle.clone();
@@ -349,14 +609,28 @@ fn main() {
         })
         .on_window_event(|window, event| {
             // 当窗口关闭时，确保所有子进程都被终止
-            if let tauri::WindowEvent::Destroyed = event {
-                println!("Window is being destroyed, killing all child processes...");
-                let app_handle = window.app_handle();
-                let state = app_handle.state::<SharedProcessManager>();
-                
-                // 直接调用非异步的 kill_all 方法
-                let mut manager = state.lock().unwrap();
-                manager.kill_all();
+            match event {
+                tauri::WindowEvent::Destroyed => {
+                    println!("Window is being destroyed, killing all child processes...");
+                    let app_handle = window.app_handle();
+                    let state = app_handle.state::<SharedProcessManager>();
+                    
+                    // 直接调用非异步的 kill_all 方法
+                    if let Ok(mut manager) = state.lock() {
+                        manager.kill_all();
+                    };
+                }
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    println!("Window close requested, preparing to kill all child processes...");
+                    let app_handle = window.app_handle();
+                    let state = app_handle.state::<SharedProcessManager>();
+                    
+                    // 在窗口关闭请求时也清理进程
+                    if let Ok(mut manager) = state.lock() {
+                        manager.kill_all();
+                    };
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())

@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.cline.desktop",
   "build": {
-    "frontendDist": "../cline/webview-ui/dist",
+    "frontendDist": "../cline/webview-ui/build",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "cd cline && npm run compile-standalone && cd ../cline/webview-ui && npm run dev -- --port 5173",
+    "beforeDevCommand": "cd cline/webview-ui && npm run dev -- --port 5173",
     "beforeBuildCommand": "cd cline && npm run compile-standalone && cd ../cline/webview-ui && npm run build"
   },
   "app": {
@@ -17,7 +17,8 @@
         "width": 1200,
         "height": 800,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "devtools": true
       }
     ],
     "security": {
@@ -36,9 +37,6 @@
     ],
     "resources": [
       "../cline/dist-standalone"
-    ],
-    "externalBin": [
-      "../node-server/dist/node-server"
     ]
   },
   "plugins": {
@@ -47,7 +45,10 @@
       "request": true,
       "scope": [
         "http://127.0.0.1:26040/*",
-        "http://localhost:26040/*"
+        "http://localhost:26040/*",
+        "http://127.0.0.1:26041/*",
+        "http://localhost:26041/*",
+        "http://localhost:5173/*"
       ]
     },
     "shell": {
