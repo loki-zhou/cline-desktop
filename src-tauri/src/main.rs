@@ -5,7 +5,7 @@ mod hostbridge;
 mod grpc_client;
 
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, Emitter, WebviewWindowBuilder, WebviewUrl};
+use tauri::{Manager, Emitter};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::{CommandEvent, CommandChild};

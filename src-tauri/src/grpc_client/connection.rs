@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::grpc_client::{
     types::{GrpcResult, ServiceType, ServiceHandler, LruCache, CacheConfig},
     utils::{log_debug, log_success, log_error, DEFAULT_CONNECT_TIMEOUT, RetryConfig, PerformanceStats},
-    services::{StateServiceHandler, UiServiceHandler, McpServiceHandler},
+    services::{StateServiceHandler, UiServiceHandler, McpServiceHandler, AccountServiceHandler, ModelsServiceHandler},
 };
 
 #[derive(Debug, Clone)]
@@ -58,6 +58,8 @@ impl ClineGrpcClient {
         services.insert(ServiceType::State, ServiceHandler::State(StateServiceHandler::new()));
         services.insert(ServiceType::Ui, ServiceHandler::Ui(UiServiceHandler::new()));
         services.insert(ServiceType::Mcp, ServiceHandler::Mcp(McpServiceHandler::new()));
+        services.insert(ServiceType::Account, ServiceHandler::Account(AccountServiceHandler::new()));
+        services.insert(ServiceType::Models, ServiceHandler::Models(ModelsServiceHandler::new()));
         
         Self {
             channel: None,
@@ -127,6 +129,8 @@ impl ClineGrpcClient {
                             ServiceHandler::State(handler) => handler.set_client(channel.clone()),
                             ServiceHandler::Ui(handler) => handler.set_client(channel.clone()),
                             ServiceHandler::Mcp(handler) => handler.set_client(channel.clone()),
+                            ServiceHandler::Account(handler) => handler.set_client(channel.clone()),
+                            ServiceHandler::Models(handler) => handler.set_client(channel.clone()),
                         }
                     }
                     

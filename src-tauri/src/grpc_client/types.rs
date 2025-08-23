@@ -220,6 +220,8 @@ pub enum ServiceHandler {
     State(crate::grpc_client::services::StateServiceHandler),
     Ui(crate::grpc_client::services::UiServiceHandler),
     Mcp(crate::grpc_client::services::McpServiceHandler),
+    Account(crate::grpc_client::services::AccountServiceHandler),
+    Models(crate::grpc_client::services::ModelsServiceHandler),
 }
 
 impl ServiceHandler {
@@ -232,6 +234,8 @@ impl ServiceHandler {
             ServiceHandler::State(handler) => handler.handle_request_with_config(method, message, stream_config).await,
             ServiceHandler::Ui(handler) => handler.handle_request_with_config(method, message, stream_config).await,
             ServiceHandler::Mcp(handler) => handler.handle_request_with_config(method, message, stream_config).await,
+            ServiceHandler::Account(handler) => handler.handle_request_with_config(method, message, stream_config).await,
+            ServiceHandler::Models(handler) => handler.handle_request_with_config(method, message, stream_config).await,
         }
     }
 }
