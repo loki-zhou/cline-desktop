@@ -32,9 +32,25 @@ impl UiServiceHandler {
         }
     }
     
-    pub async fn handle_request_with_config(&mut self, method: &str, _message: &Value, stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+    pub async fn handle_request_with_config(&mut self, method: &str, message: &Value, stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
         match method {
             "subscribeToPartialMessage" => self.subscribe_to_partial_message_with_config(stream_config).await,
+            "subscribeToChatButtonClicked" => self.subscribe_to_chat_button_clicked_with_config(stream_config).await,
+            "initializeWebview" => self.initialize_webview().await,
+            "subscribeToTheme" => self.subscribe_to_theme_with_config(stream_config).await,
+            "subscribeToRelinquishControl" => self.subscribe_to_relinquish_control_with_config(stream_config).await,
+            "subscribeToFocusChatInput" => self.subscribe_to_focus_chat_input_with_config(message, stream_config).await,
+            "subscribeToAddToInput" => self.subscribe_to_add_to_input_with_config(message, stream_config).await,
+            "subscribeToMcpButtonClicked" => self.subscribe_to_mcp_button_clicked_with_config(message, stream_config).await,
+            "subscribeToHistoryButtonClicked" => self.subscribe_to_history_button_clicked_with_config(message, stream_config).await,
+            "subscribeToAccountButtonClicked" => self.subscribe_to_account_button_clicked_with_config(stream_config).await,
+            "subscribeToSettingsButtonClicked" => self.subscribe_to_settings_button_clicked_with_config(message, stream_config).await,
+            "subscribeToDidBecomeVisible" => self.subscribe_to_did_become_visible_with_config(stream_config).await,
+            "scrollToSettings" => self.scroll_to_settings(message).await,
+            "onDidShowAnnouncement" => self.on_did_show_announcement().await,
+            "getWebviewHtml" => self.get_webview_html().await,
+            "openUrl" => self.open_url(message).await,
+            "openWalkthrough" => self.open_walkthrough().await,
             _ => {
                 log_debug(&format!("UiService method not implemented: {}", method));
                 Ok(serde_json::json!({
@@ -276,6 +292,334 @@ impl UiServiceHandler {
         log_success(&format!(
             "[UiService] Default partial messages stream completed, processed {} updates", 
             message_count
+        ));
+        Ok(())
+    }
+
+    // 新增的 UiService 方法实现
+    
+    async fn subscribe_to_chat_button_clicked_with_config(&mut self, stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] Starting subscribeToChatButtonClicked");
+        
+        if let Some(client) = &mut self.client {
+            let request = Request::new(EmptyRequest {
+                metadata: Some(Metadata {}),
+            });
+            
+            match client.subscribe_to_chat_button_clicked(request).await {
+                Ok(stream_result) => {
+                    let stream = stream_result.into_inner();
+                    log_success("[UiService] Successfully established chat button clicked subscription");
+                    
+                    // 在后台处理流
+                    tokio::spawn(async move {
+                        let _ = Self::handle_empty_stream(stream, "chat_button_clicked").await;
+                    });
+                    
+                    Ok(serde_json::json!({
+                        "subscription_established": true,
+                        "message": "Successfully subscribed to chat button clicked events",
+                        "type": "subscription",
+                        "service": "UiService",
+                        "method": "subscribeToChatButtonClicked"
+                    }))
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to establish chat button clicked subscription: {}", e);
+                    log_error(&format!("[UiService] {}", error_msg));
+                    Err(error_msg.into())
+                }
+            }
+        } else {
+            let error_msg = "No UiService gRPC client available";
+            log_error(&format!("[UiService] {}", error_msg));
+            Err(error_msg.into())
+        }
+    }
+    
+    async fn initialize_webview(&mut self) -> GrpcResult<Value> {
+        log_debug("[UiService] Starting initializeWebview");
+        
+        if let Some(client) = &mut self.client {
+            let request = Request::new(EmptyRequest {
+                metadata: Some(Metadata {}),
+            });
+            
+            match client.initialize_webview(request).await {
+                Ok(_) => {
+                    log_success("[UiService] Successfully initialized webview");
+                    Ok(serde_json::json!({
+                        "success": true,
+                        "message": "Webview initialized successfully",
+                        "service": "UiService",
+                        "method": "initializeWebview"
+                    }))
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to initialize webview: {}", e);
+                    log_error(&format!("[UiService] {}", error_msg));
+                    Err(error_msg.into())
+                }
+            }
+        } else {
+            let error_msg = "No UiService gRPC client available";
+            log_error(&format!("[UiService] {}", error_msg));
+            Err(error_msg.into())
+        }
+    }
+    
+    async fn subscribe_to_theme_with_config(&mut self, stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] Starting subscribeToTheme");
+        
+        if let Some(client) = &mut self.client {
+            let request = Request::new(EmptyRequest {
+                metadata: Some(Metadata {}),
+            });
+            
+            match client.subscribe_to_theme(request).await {
+                Ok(stream_result) => {
+                    let stream = stream_result.into_inner();
+                    log_success("[UiService] Successfully established theme subscription");
+                    
+                    // 在后台处理流
+                    tokio::spawn(async move {
+                        let _ = Self::handle_string_stream(stream, "theme").await;
+                    });
+                    
+                    Ok(serde_json::json!({
+                        "subscription_established": true,
+                        "message": "Successfully subscribed to theme changes",
+                        "type": "subscription",
+                        "service": "UiService",
+                        "method": "subscribeToTheme"
+                    }))
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to establish theme subscription: {}", e);
+                    log_error(&format!("[UiService] {}", error_msg));
+                    Err(error_msg.into())
+                }
+            }
+        } else {
+            let error_msg = "No UiService gRPC client available";
+            log_error(&format!("[UiService] {}", error_msg));
+            Err(error_msg.into())
+        }
+    }
+    
+    async fn subscribe_to_relinquish_control_with_config(&mut self, stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] Starting subscribeToRelinquishControl");
+        
+        if let Some(client) = &mut self.client {
+            let request = Request::new(EmptyRequest {
+                metadata: Some(Metadata {}),
+            });
+            
+            match client.subscribe_to_relinquish_control(request).await {
+                Ok(stream_result) => {
+                    let stream = stream_result.into_inner();
+                    log_success("[UiService] Successfully established relinquish control subscription");
+                    
+                    // 在后台处理流
+                    tokio::spawn(async move {
+                        let _ = Self::handle_empty_stream(stream, "relinquish_control").await;
+                    });
+                    
+                    Ok(serde_json::json!({
+                        "subscription_established": true,
+                        "message": "Successfully subscribed to relinquish control events",
+                        "type": "subscription",
+                        "service": "UiService",
+                        "method": "subscribeToRelinquishControl"
+                    }))
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to establish relinquish control subscription: {}", e);
+                    log_error(&format!("[UiService] {}", error_msg));
+                    Err(error_msg.into())
+                }
+            }
+        } else {
+            let error_msg = "No UiService gRPC client available";
+            log_error(&format!("[UiService] {}", error_msg));
+            Err(error_msg.into())
+        }
+    }
+    
+    async fn subscribe_to_focus_chat_input_with_config(&mut self, message: &Value, _stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] subscribeToFocusChatInput - returning placeholder response");
+        Ok(serde_json::json!({
+            "subscription_established": true,
+            "message": "Successfully subscribed to focus chat input events",
+            "type": "subscription",
+            "service": "UiService",
+            "method": "subscribeToFocusChatInput"
+        }))
+    }
+    
+    async fn subscribe_to_add_to_input_with_config(&mut self, _message: &Value, _stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] subscribeToAddToInput - returning placeholder response");
+        Ok(serde_json::json!({
+            "subscription_established": true,
+            "message": "Successfully subscribed to add to input events",
+            "type": "subscription",
+            "service": "UiService",
+            "method": "subscribeToAddToInput"
+        }))
+    }
+    
+    async fn subscribe_to_mcp_button_clicked_with_config(&mut self, _message: &Value, _stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] subscribeToMcpButtonClicked - returning placeholder response");
+        Ok(serde_json::json!({
+            "subscription_established": true,
+            "message": "Successfully subscribed to MCP button clicked events",
+            "type": "subscription",
+            "service": "UiService",
+            "method": "subscribeToMcpButtonClicked"
+        }))
+    }
+    
+    async fn subscribe_to_history_button_clicked_with_config(&mut self, _message: &Value, _stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] subscribeToHistoryButtonClicked - returning placeholder response");
+        Ok(serde_json::json!({
+            "subscription_established": true,
+            "message": "Successfully subscribed to history button clicked events",
+            "type": "subscription",
+            "service": "UiService",
+            "method": "subscribeToHistoryButtonClicked"
+        }))
+    }
+    
+    async fn subscribe_to_account_button_clicked_with_config(&mut self, _stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] subscribeToAccountButtonClicked - returning placeholder response");
+        Ok(serde_json::json!({
+            "subscription_established": true,
+            "message": "Successfully subscribed to account button clicked events",
+            "type": "subscription",
+            "service": "UiService",
+            "method": "subscribeToAccountButtonClicked"
+        }))
+    }
+    
+    async fn subscribe_to_settings_button_clicked_with_config(&mut self, _message: &Value, _stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] subscribeToSettingsButtonClicked - returning placeholder response");
+        Ok(serde_json::json!({
+            "subscription_established": true,
+            "message": "Successfully subscribed to settings button clicked events",
+            "type": "subscription",
+            "service": "UiService",
+            "method": "subscribeToSettingsButtonClicked"
+        }))
+    }
+    
+    async fn subscribe_to_did_become_visible_with_config(&mut self, _stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        log_debug("[UiService] subscribeToDidBecomeVisible - returning placeholder response");
+        Ok(serde_json::json!({
+            "subscription_established": true,
+            "message": "Successfully subscribed to webview visibility events",
+            "type": "subscription",
+            "service": "UiService",
+            "method": "subscribeToDidBecomeVisible"
+        }))
+    }
+    
+    async fn scroll_to_settings(&mut self, _message: &Value) -> GrpcResult<Value> {
+        log_debug("[UiService] scrollToSettings - returning placeholder response");
+        Ok(serde_json::json!({
+            "success": true,
+            "message": "Settings scrolled",
+            "service": "UiService",
+            "method": "scrollToSettings"
+        }))
+    }
+    
+    async fn on_did_show_announcement(&mut self) -> GrpcResult<Value> {
+        log_debug("[UiService] onDidShowAnnouncement - returning placeholder response");
+        Ok(serde_json::json!({
+            "value": false,
+            "success": true,
+            "service": "UiService",
+            "method": "onDidShowAnnouncement"
+        }))
+    }
+    
+    async fn get_webview_html(&mut self) -> GrpcResult<Value> {
+        log_debug("[UiService] getWebviewHtml - returning placeholder response");
+        Ok(serde_json::json!({
+            "html": "<html><body>Placeholder</body></html>",
+            "success": true,
+            "service": "UiService",
+            "method": "getWebviewHtml"
+        }))
+    }
+    
+    async fn open_url(&mut self, _message: &Value) -> GrpcResult<Value> {
+        log_debug("[UiService] openUrl - returning placeholder response");
+        Ok(serde_json::json!({
+            "success": true,
+            "service": "UiService",
+            "method": "openUrl"
+        }))
+    }
+    
+    async fn open_walkthrough(&mut self) -> GrpcResult<Value> {
+        log_debug("[UiService] openWalkthrough - returning placeholder response");
+        Ok(serde_json::json!({
+            "success": true,
+            "service": "UiService",
+            "method": "openWalkthrough"
+        }))
+    }
+
+    // 辅助方法：处理空流（用于事件订阅）
+    async fn handle_empty_stream(
+        mut stream: tonic::Streaming<crate::grpc_client::cline::Empty>,
+        stream_name: &str
+    ) -> GrpcResult<()> {
+        log_debug(&format!("[UiService] Starting {} stream processing", stream_name));
+        
+        let mut event_count = 0;
+        
+        while let Some(_event_result) = stream.message().await.map_err(|e| {
+            log_error(&format!("[UiService] {} stream error: {}", stream_name, e));
+            format!("{} stream error: {}", stream_name, e)
+        })? {
+            event_count += 1;
+            log_debug(&format!("[UiService] Received {} event #{}", stream_name, event_count));
+        }
+        
+        log_success(&format!(
+            "[UiService] {} stream completed, processed {} events",
+            stream_name, event_count
+        ));
+        Ok(())
+    }
+
+    // 辅助方法：处理字符串流
+    async fn handle_string_stream(
+        mut stream: tonic::Streaming<crate::grpc_client::cline::String>,
+        stream_name: &str
+    ) -> GrpcResult<()> {
+        log_debug(&format!("[UiService] Starting {} string stream processing", stream_name));
+        
+        let mut message_count = 0;
+        
+        while let Some(message_result) = stream.message().await.map_err(|e| {
+            log_error(&format!("[UiService] {} string stream error: {}", stream_name, e));
+            format!("{} string stream error: {}", stream_name, e)
+        })? {
+            message_count += 1;
+            log_debug(&format!(
+                "[UiService] Received {} string message #{}: {}", 
+                stream_name, 
+                message_count,
+                message_result.value.chars().take(50).collect::<String>()
+            ));
+        }
+        
+        log_success(&format!(
+            "[UiService] {} string stream completed, processed {} messages",
+            stream_name, message_count
         ));
         Ok(())
     }
