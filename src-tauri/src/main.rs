@@ -124,13 +124,15 @@ async fn start_cline_core(
                         
                         // 更灵活的就绪检测条件 - 检测多种可能的就绪信号
                         if line_str.contains("HostBridge is serving") || 
-                           line_str.contains("ProtoBus gRPC server listening on") {
+                           line_str.contains("ProtoBus gRPC server listening on") ||
+                           line_str.contains("gRPC server listening") ||
+                           line_str.contains("Server started") {
                             let window_clone = window.clone();
                             println!("[DEBUG] Detected cline-core ready signal: {}", line_str.trim());
-                            println!("[DEBUG] Emitting cline-core-ready event in 1 second...");
-                            // 在发送就绪事件之前，添加一个短暂的非阻塞延迟
+                            println!("[DEBUG] Emitting cline-core-ready event in 3 seconds...");
+                            // 在发送就绪事件之前，增加等待时间以确保服务完全启动
                             tauri::async_runtime::spawn(async move {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                                tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
                                 println!("[DEBUG] Emitting cline-core-ready event now");
                                 match window_clone.emit("cline-core-ready", ()) {
                                     Ok(_) => println!("[DEBUG] ✅ cline-core-ready event emitted successfully"),
@@ -335,6 +337,31 @@ async fn stop_all_processes(process_manager: tauri::State<'_, SharedProcessManag
     Ok("All processes stopped successfully".to_string())
 }
 
+#[tauri::command]
+async fn test_grpc_connection() -> Result<String, String> {
+    println!("[DEBUG] Testing gRPC connection to cline-core...");
+    
+    let client = grpc_client::get_global_client().await;
+    let client_lock = client.lock().await;
+    
+    let connection_info = client_lock.get_connection_info();
+    let performance_stats = client_lock.get_performance_stats();
+    let cache_stats = client_lock.get_cache_stats();
+    
+    let test_result = serde_json::json!({
+        "connection_info": connection_info,
+        "performance_stats": performance_stats,
+        "cache_stats": cache_stats,
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    });
+    
+    println!("[DEBUG] gRPC Connection Test Result: {}", test_result);
+    Ok(test_result.to_string())
+}
+
 // Webview消息结构体
 #[derive(Debug, Deserialize, Serialize)]
 struct WebviewMessage {
@@ -447,6 +474,8 @@ async fn forward_to_protobus(grpc_request: &GrpcRequest) -> Result<Value, String
     let client = grpc_client::get_global_client().await;
     let mut client_lock = client.lock().await;
     
+    println!("[DEBUG] Attempting to ensure gRPC client connection...");
+    
     // 尝试使用真正的 gRPC 连接
     match client_lock.handle_request(
         &grpc_request.service,
@@ -460,6 +489,7 @@ async fn forward_to_protobus(grpc_request: &GrpcRequest) -> Result<Value, String
         }
         Err(e) => {
             println!("[DEBUG] ❌ Real gRPC request failed: {}, falling back to mock response", e);
+            println!("[DEBUG] Error details: {:?}", e);
             
             // 如果 gRPC 连接失败，返回 mock 响应
             fallback_mock_response(grpc_request)
@@ -600,6 +630,7 @@ fn main() {
             start_node_server,
             start_node_server_sidecar,
             stop_all_processes,
+            test_grpc_connection,
             handle_webview_message
         ])
         .setup(|app| {
@@ -620,12 +651,16 @@ fn main() {
             
             // 在应用启动时自动启动cline-core
             tauri::async_runtime::spawn(async move {
+                // 等待 HostBridge 服务启动（1秒）
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                
                 // 获取进程管理器状态
                 let process_manager_state = app_handle.state::<SharedProcessManager>();
                 
+                println!("[STARTUP] Starting cline-core process...");
                 match start_cline_core(app_handle.clone(), process_manager_state).await {
-                    Ok(msg) => println!("{}", msg),
-                    Err(e) => eprintln!("Error starting cline-core: {}", e)
+                    Ok(msg) => println!("[STARTUP] {}", msg),
+                    Err(e) => eprintln!("[STARTUP] Error starting cline-core: {}", e)
                 }
             });
             

@@ -25,8 +25,13 @@ impl Default for ConnectionConfig {
         Self {
             endpoint: "http://127.0.0.1:26040".to_string(),
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
-            retry_config: RetryConfig::default(),
-            health_check_interval: std::time::Duration::from_secs(30),
+            retry_config: RetryConfig {
+                max_retries: 8, // 增加重试次数
+                initial_delay: Duration::from_millis(2000), // 增加初始延迟
+                max_delay: Duration::from_secs(30),
+                backoff_multiplier: 1.5, // 更渐进的退避策略
+            },
+            health_check_interval: Duration::from_secs(60), // 增加健康检查间隔
             cache_config: CacheConfig::default(),
             enable_performance_monitoring: true,
             max_concurrent_requests: 100,

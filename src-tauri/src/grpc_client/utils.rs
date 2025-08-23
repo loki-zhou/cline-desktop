@@ -2,13 +2,13 @@ use std::time::{Duration, Instant};
 use tokio::time::{timeout, sleep};
 use crate::grpc_client::GrpcResult;
 
-// 公共的超时配置
-pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+// 公共的超时配置 - 增加超时时间以适应服务启动
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-// 重试配置
-pub const DEFAULT_MAX_RETRIES: usize = 3;
-pub const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(1000);
+// 重试配置 - 增加重试次数和延迟以适应服务启动时间
+pub const DEFAULT_MAX_RETRIES: usize = 8;
+pub const DEFAULT_RETRY_DELAY: Duration = Duration::from_millis(2000);
 pub const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 // 性能监控配置
