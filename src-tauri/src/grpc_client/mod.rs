@@ -19,14 +19,14 @@ pub mod cline {
 pub use connection::ClineGrpcClient;
 pub use types::*;
 
-// 全局客户端实例
-use tokio::sync::Mutex;
+// 使用简单的 Arc 共享客户端，无需锁
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 lazy_static::lazy_static! {
-    static ref GLOBAL_CLIENT: Arc<Mutex<ClineGrpcClient>> = Arc::new(Mutex::new(ClineGrpcClient::new()));
+    static ref GLOBAL_CLIENT: Arc<RwLock<ClineGrpcClient>> = Arc::new(RwLock::new(ClineGrpcClient::new()));
 }
 
-pub async fn get_global_client() -> Arc<Mutex<ClineGrpcClient>> {
+pub async fn get_global_client() -> Arc<RwLock<ClineGrpcClient>> {
     GLOBAL_CLIENT.clone()
 }

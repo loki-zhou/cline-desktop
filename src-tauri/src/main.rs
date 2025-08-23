@@ -341,12 +341,12 @@ async fn stop_all_processes(process_manager: tauri::State<'_, SharedProcessManag
 async fn test_grpc_connection() -> Result<String, String> {
     println!("[DEBUG] Testing gRPC connection to cline-core...");
     
-    let client = grpc_client::get_global_client().await;
-    let client_lock = client.lock().await;
+    // 创建新的客户端实例进行测试
+    let mut client = grpc_client::ClineGrpcClient::new();
     
-    let connection_info = client_lock.get_connection_info();
-    let performance_stats = client_lock.get_performance_stats();
-    let cache_stats = client_lock.get_cache_stats();
+    let connection_info = client.get_connection_info();
+    let performance_stats = client.get_performance_stats();
+    let cache_stats = client.get_cache_stats();
     
     let test_result = serde_json::json!({
         "connection_info": connection_info,
@@ -470,14 +470,14 @@ async fn forward_to_protobus(grpc_request: &GrpcRequest) -> Result<Value, String
     println!("[DEBUG] Forwarding gRPC request to ProtoBus (26040): service={}, method={}, request_id={}", 
         grpc_request.service, grpc_request.method, grpc_request.request_id);
     
-    // 获取全局 gRPC 客户端实例
-    let client = grpc_client::get_global_client().await;
-    let mut client_lock = client.lock().await;
+    // 为每个请求创建独立的客户端实例，完全避免锁竞争
+    println!("[DEBUG] Creating new gRPC client instance for this request...");
+    let mut client = grpc_client::ClineGrpcClient::new();
     
     println!("[DEBUG] Attempting to ensure gRPC client connection...");
     
     // 尝试使用真正的 gRPC 连接
-    match client_lock.handle_request(
+    match client.handle_request(
         &grpc_request.service,
         &grpc_request.method,
         &grpc_request.message
