@@ -284,6 +284,27 @@ Port 26040 (ProtoBus)     │ Port 26041 (HostBridge)
     </td>
   </tr>
   <tr>
+    <td><b>🔧 gRPC 流式订阅超时修复</b></td>
+    <td>
+      • <b>核心问题解决</b>: 修复了 <code>subscribeToMcpServers</code> 和 <code>subscribeToPartialMessage</code> 连接超时错误<br>
+      • <b>协议理解</b>: 深入研究原始 cline MCP 订阅协议，理解被动订阅模式的正确实现方式<br>
+      • <b>架构优化</b>: 移除 <code>with_timeout</code> 包装器，立即返回订阅成功响应，在后台维护流连接<br>
+      • <b>方法实现</b>: 添加 <code>handle_default_mcp_servers_stream</code> 和 <code>handle_default_partial_messages_stream</code> 方法<br>
+      • <b>配置调优</b>: 连接超时从5s增加到15s，重试次数从3次增加到8次，提升连接稳定性<br>
+      • <b>实时推送</b>: 支持 McpHub 状态推送和部分消息的实时流式处理
+    </td>
+  </tr>
+  <tr>
+    <td><b>🐛 WebView-UI 状态水合修复</b></td>
+    <td>
+      • <b>问题描述</b>: webview-ui 无法展示，卡在 didHydrateState=false 状态<br>
+      • <b>根本原因</b>: 后端 Rust 代码错误解析 State 消息，破坏了 protobuf 结构<br>
+      • <b>修复方案</b>: 修改 state_service.rs 确保返回正确的 {"stateJson": "..."} 结构<br>
+      • <b>技术细节</b>: 移除了错误的 JSON 解析，保持 State 消息的 stateJson 字段原样传递<br>
+      • <b>测试结果</b>: didHydrateState 正确设置为 true，UI 界面正常显示
+    </td>
+  </tr>
+  <tr>
     <td><b>📊 高性能缓存系统</b></td>
     <td>
       • <b>LRU 缓存</b>: 支持 TTL、自动过期清理、命中率统计<br>
@@ -455,12 +476,14 @@ Port 26040 (ProtoBus)     │ Port 26041 (HostBridge)
   - **编译状态**: ✅ 成功编译，无错误（19个警告为未使用代码）
   - **测试覆盖**: 单元测试 + 集成测试 + 性能测试
   - **文档完整性**: API文档 + 使用示例 + 故障排除指南
+  - **🔧 流式订阅修复**: 解决了核心 gRPC 流式订阅超时问题，实现正确的被动订阅模式
 
 **🔄 架构集成验证:**
 - ProtoBus ↔ HostBridge 通信: gRPC 服务间连接已建立
 - 前端 ↔ 双端口服务: webview-ui 可访问两个后端服务
 - 文件路径问题: descriptor_set.pb 路径已修复
 - **gRPC 客户端集成**: 与主应用完全集成，可通过 get_global_client() 使用
+- **🔧 流式订阅稳定性**: 修复了 `subscribeToMcpServers` 和 `subscribeToPartialMessage` 的连接超时问题，实现了正确的被动订阅模式，支持实时推送功能
 
 ---
 

@@ -40,14 +40,16 @@ impl StateServiceHandler {
             log_success(&format!("Received state from cline-core, state_json length: {}", 
                 state.state_json.len()));
             
-            // 解析 state_json
-            let state_value: Value = serde_json::from_str(&state.state_json)
-                .unwrap_or_else(|e| {
-                    log_debug(&format!("Failed to parse state_json: {}, using raw string", e));
-                    serde_json::json!({ "state_json": state.state_json })
-                });
+            // 返回正确的 State 消息结构，保持 stateJson 字段
+            let state_response = serde_json::json!({
+                "stateJson": state.state_json
+            });
             
-            Ok(state_value)
+            println!("[DEBUG] ===== RETURNING STATE RESPONSE TO FRONTEND =====");
+            println!("[DEBUG] State response structure: {}", 
+                serde_json::to_string_pretty(&state_response).unwrap_or_else(|_| "Invalid JSON".to_string()));
+            
+            Ok(state_response)
         } else {
             Err("No StateService gRPC client available".into())
         }
@@ -58,18 +60,26 @@ impl StateServiceHandler {
     }
     
     async fn subscribe_to_state_with_config(&mut self, stream_config: Option<StreamConfig>) -> GrpcResult<Value> {
+        println!("[DEBUG] ===== StateService.subscribe_to_state_with_config CALLED =====");
+        println!("[DEBUG] stream_config: {:?}", stream_config);
+        
         if let Some(client) = &mut self.client {
+            println!("[DEBUG] StateService client is available");
             log_debug("Calling subscribeToState on cline-core");
             
+            println!("[DEBUG] Creating gRPC request for subscribeToState");
             let request = Request::new(EmptyRequest {
                 metadata: Some(Metadata {}),
             });
             
+            println!("[DEBUG] Sending gRPC request to cline-core on port 26040");
             let mut stream = with_timeout(
                 client.subscribe_to_state(request),
                 DEFAULT_REQUEST_TIMEOUT,
                 "subscribeToState"
             ).await?.into_inner();
+            
+            println!("[DEBUG] Successfully got stream from cline-core, checking configuration...");
             
             // 如果配置了流式处理，则持续监听
             if let Some(config) = stream_config {
@@ -79,21 +89,34 @@ impl StateServiceHandler {
             }
             
             // 默认行为：只返回第一个响应
+            println!("[DEBUG] Waiting for first message from stream...");
             if let Some(state_result) = stream.message().await? {
+                println!("[DEBUG] ===== RECEIVED STATE FROM CLINE-CORE =====");
                 log_success(&format!("Received state from subscribeToState, state_json length: {}", 
                     state_result.state_json.len()));
-                
-                let state_value: Value = serde_json::from_str(&state_result.state_json)
-                    .unwrap_or_else(|e| {
-                        log_debug(&format!("Failed to parse state_json: {}, using raw string", e));
-                        serde_json::json!({ "state_json": state_result.state_json })
+                println!("[DEBUG] Raw state_json (first 200 chars): {}", 
+                    if state_result.state_json.len() > 200 { 
+                        &state_result.state_json[..200] 
+                    } else { 
+                        &state_result.state_json 
                     });
                 
-                return Ok(state_value);
+                // 返回正确的 State 消息结构，保持 stateJson 字段
+                let state_response = serde_json::json!({
+                    "stateJson": state_result.state_json
+                });
+                
+                println!("[DEBUG] ===== RETURNING STATE RESPONSE TO FRONTEND =====");
+                println!("[DEBUG] State response structure: {}", 
+                    serde_json::to_string_pretty(&state_response).unwrap_or_else(|_| "Invalid JSON".to_string()));
+                
+                return Ok(state_response);
             }
             
+            println!("[DEBUG] ===== NO STATE RECEIVED FROM STREAM =====");
             Err("No state received from stream".into())
         } else {
+            println!("[DEBUG] ===== NO STATSERVICE CLIENT AVAILABLE =====");
             Err("No StateService gRPC client available".into())
         }
     }
