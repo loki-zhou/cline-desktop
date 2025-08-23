@@ -59,42 +59,55 @@ impl UiServiceHandler {
                 metadata: Some(Metadata {}),
             });
             
-            // 建立流式连接
-            let stream_result = with_timeout(
-                client.subscribe_to_partial_message(request),
-                DEFAULT_REQUEST_TIMEOUT,
-                "subscribeToPartialMessage connection"
-            ).await?;
-            
-            let mut stream = stream_result.into_inner();
-            
-            log_success("[UiService] Successfully established partial message subscription - returning immediately");
-            
-            // 对于被动订阅服务，立即返回成功响应
-            // 不等待数据推送，因为这是事件驱动的
-            if let Some(config) = stream_config {
-                if config.enable_streaming {
-                    // 如果明确启用了流式处理，在后台异步处理
-                    log_debug("[UiService] Starting background stream processing");
-                    tokio::spawn(async move {
-                        let _ = Self::handle_background_partial_messages_stream(stream, config).await;
+            // 建立流式连接，但不等待第一个消息
+            match client.subscribe_to_partial_message(request).await {
+                Ok(stream_result) => {
+                    let stream = stream_result.into_inner();
+                    
+                    log_success("[UiService] Successfully established partial message subscription - returning immediately");
+                    
+                    // 对于被动订阅服务，立即返回成功响应
+                    // 不等待数据推送，因为这是事件驱动的
+                    if let Some(config) = stream_config {
+                        if config.enable_streaming {
+                            // 如果明确启用了流式处理，在后台异步处理
+                            log_debug("[UiService] Starting background stream processing");
+                            tokio::spawn(async move {
+                                let _ = Self::handle_background_partial_messages_stream(stream, config).await;
+                            });
+                        } else {
+                            log_debug("[UiService] Starting default background stream processing");
+                            // 即使没有启用显式流式处理，也要保持连接以接收部分消息推送
+                            tokio::spawn(async move {
+                                let _ = Self::handle_default_partial_messages_stream(stream).await;
+                            });
+                        }
+                    } else {
+                        log_debug("[UiService] Starting default background stream processing (no config)");
+                        // 没有配置时，使用默认的流式处理来接收部分消息推送
+                        tokio::spawn(async move {
+                            let _ = Self::handle_default_partial_messages_stream(stream).await;
+                        });
+                    }
+                    
+                    // 立即返回订阅成功状态
+                    let success_response = serde_json::json!({
+                        "subscription_established": true,
+                        "message": "Successfully subscribed to partial messages",
+                        "type": "subscription",
+                        "service": "UiService",
+                        "method": "subscribeToPartialMessage"
                     });
+                    
+                    log_success(&format!("[UiService] Returning success response: {}", success_response));
+                    return Ok(success_response);
                 }
-            } else {
-                log_debug("[UiService] No stream config - dropping stream connection");
+                Err(e) => {
+                    let error_msg = format!("Failed to establish partial message subscription: {}", e);
+                    log_error(&format!("[UiService] {}", error_msg));
+                    return Err(error_msg.into());
+                }
             }
-            
-            // 立即返回订阅成功状态
-            let success_response = serde_json::json!({
-                "subscription_established": true,
-                "message": "Successfully subscribed to partial messages",
-                "type": "subscription",
-                "service": "UiService",
-                "method": "subscribeToPartialMessage"
-            });
-            
-            log_success(&format!("[UiService] Returning success response: {}", success_response));
-            return Ok(success_response);
         } else {
             let error_msg = "No UiService gRPC client available";
             log_error(&format!("[UiService] {}", error_msg));
@@ -215,6 +228,55 @@ impl UiServiceHandler {
         }
         
         log_success(&format!("Background partial messages stream processing completed, processed {} messages", message_count));
+        Ok(())
+    }
+    
+    // 静态方法：处理默认的部分消息流式数据（根据 cline 原始逻辑）
+    async fn handle_default_partial_messages_stream(
+        mut stream: tonic::Streaming<crate::grpc_client::cline::ClineMessage>
+    ) -> GrpcResult<()> {
+        log_debug("[UiService] Starting default partial messages stream processing - maintaining active connection for real-time updates");
+        
+        let mut message_count = 0;
+        
+        // 根据 cline 原始逻辑，保持流连接活跃以接收实时的部分消息更新
+        while let Some(message_result) = stream.message().await.map_err(|e| {
+            log_error(&format!("[UiService] Default partial messages stream error: {}", e));
+            format!("Default partial messages stream error: {}", e)
+        })? {
+            message_count += 1;
+            
+            // 构建消息响应
+            let message_value = Self::build_static_partial_message_response(&message_result);
+            
+            log_debug(&format!(
+                "[UiService] Received partial message update #{}: type={}, partial={}, text_len={}", 
+                message_count,
+                message_result.r#type,
+                message_result.partial,
+                message_result.text.len()
+            ));
+            
+            // 在这里可以将部分消息更新转发给前端
+            // 这模拟了原始 cline 中实时消息推送的功能
+            if message_result.partial {
+                log_debug(&format!(
+                    "[UiService] Processing partial message: {}",
+                    message_result.text.chars().take(100).collect::<String>()
+                ));
+            } else {
+                log_success(&format!(
+                    "[UiService] Received complete message: type={}, conversation_index={}",
+                    message_result.r#type,
+                    message_result.conversation_history_index
+                ));
+            }
+        }
+        
+        log_success(&format!(
+            "[UiService] Default partial messages stream completed, processed {} updates", 
+            message_count
+        ));
         Ok(())
     }
 }
