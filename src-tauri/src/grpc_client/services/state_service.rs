@@ -73,50 +73,53 @@ impl StateServiceHandler {
             });
             
             println!("[DEBUG] Sending gRPC request to cline-core on port 26040");
-            let mut stream = with_timeout(
-                client.subscribe_to_state(request),
-                DEFAULT_REQUEST_TIMEOUT,
-                "subscribeToState"
-            ).await?.into_inner();
-            
-            println!("[DEBUG] Successfully got stream from cline-core, checking configuration...");
-            
-            // 如果配置了流式处理，则持续监听
-            if let Some(config) = stream_config {
-                if config.enable_streaming {
-                    return self.handle_streaming_state(stream, config).await;
+            match client.subscribe_to_state(request).await {
+                Ok(stream_result) => {
+                    let mut stream = stream_result.into_inner();
+                    println!("[DEBUG] Successfully got stream from cline-core, waiting for first state...");
+                    
+                    // 等待第一个状态消息（这是前端需要的初始状态）
+                    if let Some(state_result) = stream.message().await? {
+                        println!("[DEBUG] ===== RECEIVED INITIAL STATE FROM CLINE-CORE =====");
+                        log_success(&format!("Received initial state from subscribeToState, state_json length: {}", 
+                            state_result.state_json.len()));
+                        println!("[DEBUG] Raw state_json (first 200 chars): {}", 
+                            if state_result.state_json.len() > 200 { 
+                                &state_result.state_json[..200] 
+                            } else { 
+                                &state_result.state_json 
+                            });
+                        
+                        // 在后台继续处理流以接收后续状态更新
+                        println!("[DEBUG] Starting background stream processing for subsequent updates");
+                        tokio::spawn(async move {
+                            let _ = Self::handle_default_state_stream(stream).await;
+                        });
+                        
+                        // 返回初始状态给前端
+                        let state_response = serde_json::json!({
+                            "stateJson": state_result.state_json
+                        });
+                        
+                        println!("[DEBUG] ===== RETURNING INITIAL STATE RESPONSE TO FRONTEND =====");
+                        println!("[DEBUG] State response structure: {}", 
+                            serde_json::to_string_pretty(&state_response).unwrap_or_else(|_| "Invalid JSON".to_string()));
+                        
+                        return Ok(state_response);
+                    } else {
+                        println!("[DEBUG] ===== NO INITIAL STATE RECEIVED FROM STREAM =====");
+                        return Err("No initial state received from stream".into());
+                    }
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to establish state subscription: {}", e);
+                    println!("[DEBUG] ===== STATE SUBSCRIPTION FAILED =====");
+                    println!("[DEBUG] Error: {}", error_msg);
+                    return Err(error_msg.into());
                 }
             }
-            
-            // 默认行为：只返回第一个响应
-            println!("[DEBUG] Waiting for first message from stream...");
-            if let Some(state_result) = stream.message().await? {
-                println!("[DEBUG] ===== RECEIVED STATE FROM CLINE-CORE =====");
-                log_success(&format!("Received state from subscribeToState, state_json length: {}", 
-                    state_result.state_json.len()));
-                println!("[DEBUG] Raw state_json (first 200 chars): {}", 
-                    if state_result.state_json.len() > 200 { 
-                        &state_result.state_json[..200] 
-                    } else { 
-                        &state_result.state_json 
-                    });
-                
-                // 返回正确的 State 消息结构，保持 stateJson 字段
-                let state_response = serde_json::json!({
-                    "stateJson": state_result.state_json
-                });
-                
-                println!("[DEBUG] ===== RETURNING STATE RESPONSE TO FRONTEND =====");
-                println!("[DEBUG] State response structure: {}", 
-                    serde_json::to_string_pretty(&state_response).unwrap_or_else(|_| "Invalid JSON".to_string()));
-                
-                return Ok(state_response);
-            }
-            
-            println!("[DEBUG] ===== NO STATE RECEIVED FROM STREAM =====");
-            Err("No state received from stream".into())
         } else {
-            println!("[DEBUG] ===== NO STATSERVICE CLIENT AVAILABLE =====");
+            println!("[DEBUG] ===== NO STATESERVICE CLIENT AVAILABLE =====");
             Err("No StateService gRPC client available".into())
         }
     }
@@ -165,6 +168,112 @@ impl StateServiceHandler {
             "streaming": true,
             "messages_processed": message_count
         })))
+    }
+    
+    // 静态方法：在后台处理状态流式数据（带配置）
+    async fn handle_background_state_stream(
+        mut stream: tonic::Streaming<crate::grpc_client::cline::State>,
+        config: StreamConfig
+    ) -> GrpcResult<()> {
+        println!("[DEBUG] Starting background state stream processing with config");
+        
+        let mut message_count = 0;
+        let max_messages = config.max_messages.unwrap_or(usize::MAX);
+        
+        while let Some(state_result) = stream.message().await.map_err(|e| {
+            println!("[DEBUG] Background state stream error: {}", e);
+            format!("Background state stream error: {}", e)
+        })? {
+            message_count += 1;
+            
+            println!("[DEBUG] ===== RECEIVED STATE UPDATE #{} IN BACKGROUND =====", message_count);
+            println!("[DEBUG] State JSON length: {}", state_result.state_json.len());
+            println!("[DEBUG] State JSON preview: {}", 
+                if state_result.state_json.len() > 200 { 
+                    &state_result.state_json[..200] 
+                } else { 
+                    &state_result.state_json 
+                });
+            
+            // 构建状态值
+            let state_value = serde_json::json!({
+                "stateJson": state_result.state_json
+            });
+            
+            // 如果有回调，调用它来转发状态更新到前端
+            if let Some(ref callback) = config.callback {
+                if let Err(e) = callback(state_value) {
+                    println!("[DEBUG] Background state stream callback error: {}", e);
+                }
+            }
+            
+            println!("[DEBUG] Processed background state update {}/{}", message_count, max_messages);
+            
+            // 检查是否达到最大消息数量
+            if message_count >= max_messages {
+                println!("[DEBUG] Reached maximum message limit in background state stream");
+                break;
+            }
+        }
+        
+        log_success(&format!("Background state stream processing completed, processed {} updates", message_count));
+        Ok(())
+    }
+    
+    // 静态方法：处理默认的状态流式数据（类似 UiService 的处理方式）
+    async fn handle_default_state_stream(
+        mut stream: tonic::Streaming<crate::grpc_client::cline::State>
+    ) -> GrpcResult<()> {
+        println!("[DEBUG] ===== Starting default state stream processing - maintaining active connection for real-time state updates =====");
+        
+        let mut message_count = 0;
+        
+        // 保持流连接活跃以接收实时的状态更新
+        while let Some(state_result) = stream.message().await.map_err(|e| {
+            println!("[DEBUG] Default state stream error: {}", e);
+            format!("Default state stream error: {}", e)
+        })? {
+            message_count += 1;
+            
+            println!("[DEBUG] ===== RECEIVED STATE UPDATE #{} =====", message_count);
+            println!("[DEBUG] State JSON length: {}", state_result.state_json.len());
+            
+            // 尝试解析状态 JSON 来提取关键信息
+            if let Ok(parsed_state) = serde_json::from_str::<Value>(&state_result.state_json) {
+                // 检查是否包含 API 配置更新
+                if let Some(api_config) = parsed_state.get("apiConfiguration") {
+                    println!("[DEBUG] ===== API CONFIGURATION UPDATE DETECTED =====");
+                    println!("[DEBUG] API Config: {}", serde_json::to_string_pretty(api_config).unwrap_or_else(|_| "Invalid JSON".to_string()));
+                }
+                
+                // 检查其他重要状态字段
+                if let Some(models) = parsed_state.get("models") {
+                    println!("[DEBUG] Models updated in state");
+                }
+                
+                if let Some(provider) = parsed_state.get("apiProvider") {
+                    println!("[DEBUG] API Provider in state: {}", provider);
+                }
+            } else {
+                println!("[DEBUG] Could not parse state JSON, raw preview: {}", 
+                    if state_result.state_json.len() > 300 { 
+                        &state_result.state_json[..300] 
+                    } else { 
+                        &state_result.state_json 
+                    });
+            }
+            
+            // 这里是关键：需要将状态更新转发给前端
+            // 在实际实现中，这里应该通过某种机制（如事件总线、回调等）
+            // 将状态更新推送到前端，触发 UI 重新渲染
+            println!("[DEBUG] State update #{} processed - should trigger frontend update", message_count);
+        }
+        
+        log_success(&format!(
+            "[StateService] Default state stream completed, processed {} state updates", 
+            message_count
+        ));
+        Ok(())
     }
 }
 
