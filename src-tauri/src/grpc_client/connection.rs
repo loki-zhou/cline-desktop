@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tonic::transport::Channel;
 use serde_json::Value;
+use tauri::WebviewWindow;
 
 use crate::grpc_client::{
     types::{GrpcResult, ServiceType, ServiceHandler, LruCache, CacheConfig},
@@ -168,6 +169,17 @@ impl ClineGrpcClient {
         Err(last_error.unwrap_or_else(|| "Connection failed".into()))
     }
     
+    // 设置窗口引用，用于流式状态更新
+    pub fn set_window(&mut self, window: WebviewWindow) {
+        log_debug("Setting window reference for streaming state updates");
+        
+        // 为所有服务设置窗口引用
+        for (service_type, service_handler) in &mut self.services {
+            log_debug(&format!("Setting window for {} service", service_type.as_str()));
+            service_handler.set_window(window.clone());
+        }
+    }
+    
     pub async fn ensure_connected(&mut self) -> GrpcResult<()> {
         // 检查连接是否存在
         if self.channel.is_none() {
@@ -218,6 +230,16 @@ impl ClineGrpcClient {
         method: &str, 
         message: &Value
     ) -> GrpcResult<Value> {
+        self.handle_request_with_config(service, method, message, None).await
+    }
+    
+    pub async fn handle_request_with_config(
+        &mut self, 
+        service: &str, 
+        method: &str, 
+        message: &Value,
+        stream_config: Option<crate::grpc_client::types::StreamConfig>
+    ) -> GrpcResult<Value> {
         let start_time = std::time::Instant::now();
         let cache_key = format!("{}:{}:{}", service, method, serde_json::to_string(message).unwrap_or_default());
         
@@ -264,7 +286,7 @@ impl ClineGrpcClient {
         
         let result = if let Some(service_handler) = self.services.get_mut(&service_type) {
             // 尝试执行请求，如果失败则尝试重新连接
-            match service_handler.handle_request(method, message).await {
+            match service_handler.handle_request_with_config(method, message, stream_config).await {
                 Ok(result) => {
                     // 请求成功，重置失败计数器
                     self.connection_failures = 0;
@@ -289,7 +311,7 @@ impl ClineGrpcClient {
                         if let Ok(_) = self.ensure_connected().await {
                             // 重新连接成功，再次尝试请求
                             if let Some(service_handler) = self.services.get_mut(&service_type) {
-                                return match service_handler.handle_request(method, message).await {
+                                return match service_handler.handle_request_with_config(method, message, stream_config).await {
                                     Ok(result) => {
                                         if self.is_cacheable(method) {
                                             self.cache.put(cache_key, result.clone());

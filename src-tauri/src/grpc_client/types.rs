@@ -3,6 +3,7 @@ use std::error::Error;
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tauri::WebviewWindow;
 
 // 公共错误类型
 pub type GrpcResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -236,6 +237,16 @@ impl ServiceHandler {
             ServiceHandler::Mcp(handler) => handler.handle_request_with_config(method, message, stream_config).await,
             ServiceHandler::Account(handler) => handler.handle_request_with_config(method, message, stream_config).await,
             ServiceHandler::Models(handler) => handler.handle_request_with_config(method, message, stream_config).await,
+        }
+    }
+    
+    pub fn set_window(&mut self, window: WebviewWindow) {
+        match self {
+            ServiceHandler::State(handler) => handler.set_window(window),
+            ServiceHandler::Ui(handler) => {},
+            ServiceHandler::Mcp(handler) => {},
+            ServiceHandler::Account(handler) => {},
+            ServiceHandler::Models(handler) => {},
         }
     }
 }

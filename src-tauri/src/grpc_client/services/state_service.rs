@@ -1,6 +1,9 @@
 use tonic::transport::Channel;
 use tonic::Request;
 use serde_json::Value;
+use tauri::WebviewWindow;
+use std::sync::{Arc, Mutex};
+use lazy_static::lazy_static;
 
 use crate::grpc_client::{
     cline::{state_service_client::StateServiceClient, EmptyRequest, Metadata},
@@ -8,18 +11,50 @@ use crate::grpc_client::{
     utils::{with_timeout, log_debug, log_success, DEFAULT_REQUEST_TIMEOUT},
 };
 
+// 🔥 全局状态订阅管理器
+type StateSubscriptionManager = Arc<Mutex<Option<(String, WebviewWindow)>>>;
+
+lazy_static! {
+    static ref GLOBAL_STATE_SUBSCRIPTION: StateSubscriptionManager = Arc::new(Mutex::new(None));
+}
+
+// 🔥 设置全局状态订阅的 request_id 和 window
+pub fn set_global_state_subscription(request_id: String, window: WebviewWindow) {
+    if let Ok(mut subscription) = GLOBAL_STATE_SUBSCRIPTION.lock() {
+        println!("[DEBUG] 🔥 Global state subscription set: request_id={}", request_id);
+        *subscription = Some((request_id, window));
+    }
+}
+
+// 🔥 获取全局状态订阅信息
+pub fn get_global_state_subscription() -> Option<(String, WebviewWindow)> {
+    if let Ok(subscription) = GLOBAL_STATE_SUBSCRIPTION.lock() {
+        subscription.as_ref().cloned()
+    } else {
+        None
+    }
+}
+
 #[derive(Debug)]
 pub struct StateServiceHandler {
     client: Option<StateServiceClient<Channel>>,
+    window: Option<WebviewWindow>,
 }
 
 impl StateServiceHandler {
     pub fn new() -> Self {
-        Self { client: None }
+        Self { 
+            client: None,
+            window: None,
+        }
     }
     
     pub fn set_client(&mut self, channel: Channel) {
         self.client = Some(StateServiceClient::new(channel));
+    }
+    
+    pub fn set_window(&mut self, window: WebviewWindow) {
+        self.window = Some(window);
     }
     
     async fn get_latest_state(&mut self) -> GrpcResult<Value> {
@@ -79,42 +114,20 @@ impl StateServiceHandler {
                 "subscribeToState"
             ).await?.into_inner();
             
-            println!("[DEBUG] Successfully got stream from cline-core, checking configuration...");
+            println!("[DEBUG] Successfully got stream from cline-core, setting up persistent streaming...");
             
-            // 如果配置了流式处理，则持续监听
-            if let Some(config) = stream_config {
-                if config.enable_streaming {
-                    return self.handle_streaming_state(stream, config).await;
+            // 🔥 修复关键问题：总是启用流式处理以监听状态更新
+            let effective_config = stream_config.unwrap_or_else(|| {
+                println!("[DEBUG] No stream config provided, creating default streaming config");
+                StreamConfig {
+                    enable_streaming: true,  // 🔥 关键修复：总是启用流式处理
+                    callback: None,
+                    max_messages: None,      // 🔥 无限制监听
                 }
-            }
+            });
             
-            // 默认行为：只返回第一个响应
-            println!("[DEBUG] Waiting for first message from stream...");
-            if let Some(state_result) = stream.message().await? {
-                println!("[DEBUG] ===== RECEIVED STATE FROM CLINE-CORE =====");
-                log_success(&format!("Received state from subscribeToState, state_json length: {}", 
-                    state_result.state_json.len()));
-                println!("[DEBUG] Raw state_json (first 200 chars): {}", 
-                    if state_result.state_json.len() > 200 { 
-                        &state_result.state_json[..200] 
-                    } else { 
-                        &state_result.state_json 
-                    });
-                
-                // 返回正确的 State 消息结构，保持 stateJson 字段
-                let state_response = serde_json::json!({
-                    "stateJson": state_result.state_json
-                });
-                
-                println!("[DEBUG] ===== RETURNING STATE RESPONSE TO FRONTEND =====");
-                println!("[DEBUG] State response structure: {}", 
-                    serde_json::to_string_pretty(&state_response).unwrap_or_else(|_| "Invalid JSON".to_string()));
-                
-                return Ok(state_response);
-            }
-            
-            println!("[DEBUG] ===== NO STATE RECEIVED FROM STREAM =====");
-            Err("No state received from stream".into())
+            // 🔥 总是使用流式处理来监听状态更新
+            return self.handle_streaming_state(stream, effective_config).await;
         } else {
             println!("[DEBUG] ===== NO STATSERVICE CLIENT AVAILABLE =====");
             Err("No StateService gRPC client available".into())
@@ -126,45 +139,122 @@ impl StateServiceHandler {
         mut stream: tonic::Streaming<crate::grpc_client::cline::State>,
         config: StreamConfig
     ) -> GrpcResult<Value> {
-        log_debug("Starting streaming state processing");
+        log_debug("🔥 Starting PERSISTENT streaming state processing for ongoing updates");
         
         let mut message_count = 0;
         let max_messages = config.max_messages.unwrap_or(usize::MAX);
-        let mut last_state: Option<Value> = None;
+        let mut first_state: Option<Value> = None;
         
-        while let Some(state_result) = stream.message().await? {
-            let state_value: Value = serde_json::from_str(&state_result.state_json)
-                .unwrap_or_else(|e| {
-                    log_debug(&format!("Failed to parse state_json: {}, using raw string", e));
-                    serde_json::json!({ "state_json": state_result.state_json })
-                });
+        // 🔥 在后台启动持续监听任务
+        if let Some(window) = self.window.clone() {
+            println!("[DEBUG] 🔥 Starting background task for persistent state monitoring");
             
-            // 如果有回调，调用它
-            if let Some(ref callback) = config.callback {
-                if let Err(e) = callback(state_value.clone()) {
-                    log_debug(&format!("Stream callback error: {}", e));
+            let window_clone = window.clone();
+            tokio::spawn(async move {
+                println!("[DEBUG] 🔥 Background state monitoring task started");
+                
+                // 🔥 保存初始 request_id 以用于最初响应
+                let mut original_request_id: Option<String> = None;
+                
+                loop {
+                    match stream.message().await {
+                        Ok(Some(state_result)) => {
+                            println!("[DEBUG] 🔥 ===== RECEIVED STREAMING STATE UPDATE (Background) =====");
+                            println!("[DEBUG] State update length: {}", state_result.state_json.len());
+                            
+                            // 构造状态响应
+                            let state_response = serde_json::json!({
+                                "stateJson": state_result.state_json
+                            });
+                            
+                            // 🔥 使用全局保存的 request_id 或者生成新的
+                            let request_id = if let Some((saved_request_id, _)) = get_global_state_subscription() {
+                                saved_request_id
+                            } else {
+                                let new_id = "state_subscription_stream".to_string();
+                                original_request_id = Some(new_id.clone());
+                                new_id
+                            };
+                            
+                            // 实时转发状态更新到前端
+                            let response_message = serde_json::json!({
+                                "type": "grpc_response",
+                                "grpc_response": {
+                                    "request_id": request_id,
+                                    "message": state_response,
+                                    "error": null,
+                                    "is_streaming": true
+                                }
+                            });
+                            
+                            // 使用 eval 执行 JavaScript 将响应发送到前端
+                            let js_code = format!(
+                                "window.dispatchEvent(new MessageEvent('message', {{ data: {} }}));",
+                                response_message.to_string()
+                            );
+                            
+                            match window_clone.eval(&js_code) {
+                                Ok(_) => println!("[DEBUG] 🔥 ✅ State update forwarded to frontend successfully"),
+                                Err(e) => println!("[DEBUG] 🔥 ❌ Failed to forward state update: {}", e),
+                            }
+                        }
+                        Ok(None) => {
+                            println!("[DEBUG] 🔥 State stream ended, no more updates");
+                            break;
+                        }
+                        Err(e) => {
+                            println!("[DEBUG] 🔥 ❌ State stream error: {}", e);
+                            break;
+                        }
+                    }
+                }
+                
+                println!("[DEBUG] 🔥 Background state monitoring task ended");
+            });
+            
+            // 🔥 立即返回初始状态，让前端先水合
+            println!("[DEBUG] 🔥 Returning initial success response to allow frontend hydration");
+            Ok(serde_json::json!({
+                "streaming": true,
+                "background_monitoring": true,
+                "message": "State subscription active, monitoring for updates in background"
+            }))
+        } else {
+            // 如果没有窗口引用，使用同步处理方式
+            println!("[DEBUG] 🔥 No window reference, using synchronous streaming");
+            
+            while let Some(state_result) = stream.message().await? {
+                let state_response = serde_json::json!({
+                    "stateJson": state_result.state_json
+                });
+                
+                println!("[DEBUG] 🔥 ===== RECEIVED STREAMING STATE UPDATE (Sync) =====");
+                log_success(&format!("Received streaming state update, state_json length: {}", 
+                    state_result.state_json.len()));
+                
+                // 记录第一个状态用于返回
+                if first_state.is_none() {
+                    first_state = Some(state_response.clone());
+                }
+                
+                message_count += 1;
+                log_debug(&format!("Processed streaming state message {}/{}", message_count, max_messages));
+                
+                // 检查是否达到最大消息数量
+                if message_count >= max_messages {
+                    log_debug("Reached maximum message limit, stopping stream");
+                    break;
                 }
             }
             
-            last_state = Some(state_value);
-            message_count += 1;
+            log_success(&format!("Streaming state processing completed, processed {} messages", message_count));
             
-            log_debug(&format!("Processed streaming state message {}/{}", message_count, max_messages));
-            
-            // 检查是否达到最大消息数量
-            if message_count >= max_messages {
-                log_debug("Reached maximum message limit, stopping stream");
-                break;
-            }
+            // 返回第一条消息或默认值
+            Ok(first_state.unwrap_or_else(|| serde_json::json!({
+                "streaming": true,
+                "messages_processed": message_count
+            })))
         }
-        
-        log_success(&format!("Streaming state processing completed, processed {} messages", message_count));
-        
-        // 返回最后一条消息或默认值
-        Ok(last_state.unwrap_or_else(|| serde_json::json!({
-            "streaming": true,
-            "messages_processed": message_count
-        })))
     }
 }
 

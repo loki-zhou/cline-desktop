@@ -4,13 +4,27 @@
 mod hostbridge;
 mod grpc_client;
 
+use grpc_client::services::state_service;
 use std::sync::{Arc, Mutex};
-use tauri::{Manager, Emitter};
+use tauri::{Manager, Emitter, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::{CommandEvent, CommandChild};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+// 🔥 全局窗口管理器
+type SharedWindow = Arc<Mutex<Option<WebviewWindow>>>;
+
+fn create_window_manager() -> SharedWindow {
+    Arc::new(Mutex::new(None))
+}
+
+// 🔥 全局获取窗口引用的函数
+fn get_main_window() -> Option<WebviewWindow> {
+    // 这是一个简化版本，实际使用中可以通过全局状态管理
+    None // 占位符，实际会通过消息传递处理
+}
 
 
 #[tauri::command]
@@ -342,7 +356,7 @@ async fn test_grpc_connection() -> Result<String, String> {
     println!("[DEBUG] Testing gRPC connection to cline-core...");
     
     // 创建新的客户端实例进行测试
-    let mut client = grpc_client::ClineGrpcClient::new();
+    let client = grpc_client::ClineGrpcClient::new();
     
     let connection_info = client.get_connection_info();
     let performance_stats = client.get_performance_stats();
@@ -398,7 +412,7 @@ async fn handle_webview_message(
                 let forward_result = if grpc_request.service.starts_with("cline.") {
                     println!("[DEBUG] Forwarding to ProtoBus (26040): {} {}", grpc_request.service, grpc_request.method);
                     // 转发到ProtoBus (Node.js cline-core on port 26040)
-                    forward_to_protobus(&grpc_request).await
+                    forward_to_protobus(&grpc_request, &app_handle).await
                 } else if grpc_request.service.starts_with("host.") {
                     println!("[DEBUG] Forwarding to HostBridge (26041): {} {}", grpc_request.service, grpc_request.method);
                     // 转发到HostBridge (Rust HostBridge on port 26041)
@@ -466,7 +480,7 @@ async fn handle_webview_message(
     }
 }
 
-async fn forward_to_protobus(grpc_request: &GrpcRequest) -> Result<Value, String> {
+async fn forward_to_protobus(grpc_request: &GrpcRequest, app_handle: &tauri::AppHandle) -> Result<Value, String> {
     println!("[DEBUG] Forwarding gRPC request to ProtoBus (26040): service={}, method={}, request_id={}", 
         grpc_request.service, grpc_request.method, grpc_request.request_id);
     
@@ -474,13 +488,52 @@ async fn forward_to_protobus(grpc_request: &GrpcRequest) -> Result<Value, String
     println!("[DEBUG] Creating new gRPC client instance for this request...");
     let mut client = grpc_client::ClineGrpcClient::new();
     
+    // 🔥 关键修复：为 StateService 设置窗口引用以接收状态更新
+    if grpc_request.service == "cline.StateService" {
+        println!("[DEBUG] 🔥 StateService detected, setting window reference for streaming updates...");
+        if let Some(window) = app_handle.get_webview_window("main") {
+            client.set_window(window.clone());
+            
+            // 🔥 对于 subscribeToState，保存 request_id 以便后续状态更新能正确匹配
+            if grpc_request.method == "subscribeToState" {
+                state_service::set_global_state_subscription(
+                    grpc_request.request_id.clone(),
+                    window
+                );
+            }
+            
+            println!("[DEBUG] 🔥 Window reference set successfully for StateService");
+        } else {
+            println!("[DEBUG] ❌ Failed to get main window for StateService");
+        }
+    }
+    
     println!("[DEBUG] Attempting to ensure gRPC client connection...");
     
+    // 🔥 关键修复：对于 StateService，总是启用流式处理
+    let stream_config = if grpc_request.is_streaming {
+        Some(crate::grpc_client::types::StreamConfig {
+            enable_streaming: true,
+            callback: None,
+            max_messages: None,
+        })
+    } else if grpc_request.service == "cline.StateService" && grpc_request.method == "subscribeToState" {
+        println!("[DEBUG] 🔥 Enabling streaming for StateService.subscribeToState");
+        Some(crate::grpc_client::types::StreamConfig {
+            enable_streaming: true,
+            callback: None,
+            max_messages: None,
+        })
+    } else {
+        None
+    };
+    
     // 尝试使用真正的 gRPC 连接
-    match client.handle_request(
+    match client.handle_request_with_config(
         &grpc_request.service,
         &grpc_request.method,
-        &grpc_request.message
+        &grpc_request.message,
+        stream_config
     ).await {
         Ok(response) => {
             println!("[DEBUG] ✅ Real gRPC request successful: service={}, method={}", 
@@ -650,16 +703,26 @@ fn main() {
             });
             
             // 在应用启动时自动启动cline-core
+            let app_handle_for_cline = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 // 等待 HostBridge 服务启动（1秒）
                 tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
                 
                 // 获取进程管理器状态
-                let process_manager_state = app_handle.state::<SharedProcessManager>();
+                let process_manager_state = app_handle_for_cline.state::<SharedProcessManager>();
                 
                 println!("[STARTUP] Starting cline-core process...");
-                match start_cline_core(app_handle.clone(), process_manager_state).await {
-                    Ok(msg) => println!("[STARTUP] {}", msg),
+                match start_cline_core(app_handle_for_cline.clone(), process_manager_state).await {
+                    Ok(msg) => {
+                        println!("[STARTUP] {}", msg);
+                        
+                        // 为 gRPC 客户端设置窗口引用，用于流式状态更新
+                        if let Some(window) = app_handle_for_cline.get_webview_window("main") {
+                            println!("[STARTUP] Setting window reference for gRPC client streaming updates");
+                            let mut client = grpc_client::ClineGrpcClient::new();
+                            client.set_window(window);
+                        }
+                    },
                     Err(e) => eprintln!("[STARTUP] Error starting cline-core: {}", e)
                 }
             });
