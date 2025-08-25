@@ -286,7 +286,7 @@ impl ClineGrpcClient {
         
         let result = if let Some(service_handler) = self.services.get_mut(&service_type) {
             // 尝试执行请求，如果失败则尝试重新连接
-            match service_handler.handle_request_with_config(method, message, stream_config).await {
+            match service_handler.handle_request_with_config(method, message, stream_config.clone()).await {
                 Ok(result) => {
                     // 请求成功，重置失败计数器
                     self.connection_failures = 0;
@@ -311,7 +311,7 @@ impl ClineGrpcClient {
                         if let Ok(_) = self.ensure_connected().await {
                             // 重新连接成功，再次尝试请求
                             if let Some(service_handler) = self.services.get_mut(&service_type) {
-                                return match service_handler.handle_request_with_config(method, message, stream_config).await {
+                                return match service_handler.handle_request_with_config(method, message, stream_config.clone()).await {
                                     Ok(result) => {
                                         if self.is_cacheable(method) {
                                             self.cache.put(cache_key, result.clone());

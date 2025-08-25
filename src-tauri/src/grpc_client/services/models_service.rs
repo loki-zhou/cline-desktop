@@ -82,18 +82,18 @@ impl ModelsServiceHandler {
                         }
                         Err(e) => {
                             log_debug(&format!("❌ gRPC updateApiConfigurationProto failed: {}", e));
-                            Err(format!("gRPC request failed: {}", e))
+                            Err(format!("gRPC request failed: {}", e).into())
                         }
                     }
                 }
                 Err(e) => {
                     log_debug(&format!("❌ Failed to parse API configuration: {}", e));
-                    Err(format!("Failed to parse API configuration: {}", e))
+                    Err(format!("Failed to parse API configuration: {}", e).into())
                 }
             }
         } else {
             log_debug("❌ No gRPC client available, returning error");
-            Err("No gRPC client connection available".to_string())
+            Err("No gRPC client connection available".into())
         }
     }
     

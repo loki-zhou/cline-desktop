@@ -160,8 +160,8 @@ impl StateServiceHandler {
                     match stream.message().await {
                         Ok(Some(state_result)) => {
                             println!("[DEBUG] 🔥 ===== RECEIVED STREAMING STATE UPDATE (Background) =====");
-                            println!("[DEBUG] State update length: {}", state_result.state_json.len());
-                            
+                            println!("[DEBUG] State update content: {}", state_result.state_json);
+
                             // 构造状态响应
                             let state_response = serde_json::json!({
                                 "stateJson": state_result.state_json
